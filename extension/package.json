@@ -1,0 +1,74 @@
+{
+  "name": "anuar-free-ai-console",
+  "displayName": "Free AI Console",
+  "description": "Separate VS Code panel for the local free-claude-code gateway.",
+  "version": "0.1.3",
+  "publisher": "anuar-local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*",
+    "onView:freeAiConsole.chatView",
+    "onCommand:freeAiConsole.openChat"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "freeAiConsole.openChat",
+        "title": "Free AI: Open Chat"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "freeAiConsole",
+          "title": "Free AI",
+          "icon": "media/free-ai.svg"
+        }
+      ]
+    },
+    "views": {
+      "freeAiConsole": [
+        {
+          "id": "freeAiConsole.chatView",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Free AI Console",
+      "properties": {
+        "freeAiConsole.gatewayUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8082",
+          "description": "free-claude-code gateway URL."
+        },
+        "freeAiConsole.authToken": {
+          "type": "string",
+          "default": "freecc",
+          "description": "Gateway auth token."
+        },
+        "freeAiConsole.defaultProvider": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "cerebras",
+            "gemini",
+            "gemini-fast",
+            "groq",
+            "openrouter",
+            "ollama"
+          ],
+          "description": "Default provider for Free AI Console."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+.env
+*.env
+api_key
+API tools*
+*.log
+logs/
+node_modules/
+*.vsix
+.vscode-test/
+.DS_Store
+Thumbs.db
+
