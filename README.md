@@ -19,6 +19,7 @@ http://127.0.0.1:8082
 
 - Adds a separate **Free AI** panel inside VS Code.
 - Lets you choose provider: Auto, Cerebras, Gemini, Groq, OpenRouter, Ollama.
+- Saves local request history and lets you view it from the panel.
 - Uses `free-claude-code` as a local proxy.
 - Keeps free AI chat separate from official Claude Code.
 - Includes PowerShell scripts for testing providers and switching models.
@@ -195,5 +196,46 @@ Claude/Gateway cache
 local logs
 ```
 
-The scripts assume your keys are already configured inside your local `free-claude-code` setup.
+## Quick start — Run & Package
 
+- Run in debugger (recommended):
+
+- Open this workspace in VS Code.
+- Press `F5` to launch the Extension Development Host.
+- In the new host window open the Free AI view from the activity bar or run the command `Free AI: Open Chat`.
+- Type a prompt and press Send (or Ctrl/Cmd+Enter).
+
+## Request History
+
+- All requests and responses are automatically saved locally in VS Code
+- History persists between sessions
+- Click **History** in the Free AI panel to view recent saved messages
+
+Package & install a VSIX
+
+From PowerShell inside the repository run:
+
+```powershell
+cd .\extension
+npx @vscode/vsce package
+```
+
+This will create a `.vsix` file inside the `extension` folder (for example `extension/anuar-free-ai-console-0.1.3.vsix`). Install it with:
+
+```powershell
+code --install-extension .\extension\anuar-free-ai-console-0.1.3.vsix
+```
+
+Configuration
+
+Set the gateway and token in your User or Workspace settings (Settings UI or `settings.json`):
+
+```json
+"freeAiConsole.gatewayUrl": "http://127.0.0.1:8082",
+"freeAiConsole.authToken": "freecc",
+"freeAiConsole.defaultProvider": "cerebras"
+```
+
+If you want me to install the generated VSIX now or launch the Extension Development Host for a quick interactive test, say which one and I'll proceed.
+
+The scripts assume your keys are already configured inside your local `free-claude-code` setup.

@@ -10,7 +10,7 @@ const PROVIDER_MODELS = {
 };
 
 function activate(context) {
-  const provider = new FreeAiViewProvider(context.extensionUri);
+  const provider = new FreeAiViewProvider(context.extensionUri, context);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("freeAiConsole.chatView", provider)
   );
@@ -23,9 +23,29 @@ function activate(context) {
 }
 
 class FreeAiViewProvider {
-  constructor(extensionUri) {
+  constructor(extensionUri, context) {
     this.extensionUri = extensionUri;
+    this.context = context;
     this.view = undefined;
+    this.history = this.loadHistory();
+  }
+
+  loadHistory() {
+    const saved = this.context.globalState.get("freeAi.history", []);
+    return saved;
+  }
+
+  async saveHistory() {
+    await this.context.globalState.update("freeAi.history", this.history);
+  }
+
+  addToHistory(role, text) {
+    this.history.push({
+      role: role,
+      text: text,
+      timestamp: new Date().toISOString()
+    });
+    this.saveHistory();
   }
 
   resolveWebviewView(webviewView) {
@@ -44,6 +64,8 @@ class FreeAiViewProvider {
     });
   }
 
+  
+
   async answer(prompt, provider) {
     if (!this.view) {
       return;
@@ -53,6 +75,8 @@ class FreeAiViewProvider {
     if (!text) {
       return;
     }
+
+    this.addToHistory("user", text);
 
     this.post({ type: "status", text: "Thinking..." });
 
@@ -67,9 +91,14 @@ class FreeAiViewProvider {
       this.post({ type: "status", text: `Thinking with ${selectedProvider}...` });
       await applyGatewayModel(gatewayUrl, selectedModel);
       const answer = await askGateway(gatewayUrl, authToken, text);
+      
+      this.addToHistory("assistant", answer || "(empty response)");
+      
       this.post({ type: "answer", text: answer || "(empty response)" });
     } catch (error) {
-      this.post({ type: "error", text: getErrorMessage(error) });
+      const errorMsg = getErrorMessage(error);
+      this.addToHistory("error", errorMsg);
+      this.post({ type: "error", text: errorMsg });
     }
   }
 
@@ -82,6 +111,7 @@ class FreeAiViewProvider {
     const defaultProvider = vscode.workspace
       .getConfiguration("freeAiConsole")
       .get("defaultProvider", "cerebras");
+    const initialHistory = safeJsonForHtml(this.history);
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -105,6 +135,11 @@ class FreeAiViewProvider {
       display: flex;
       gap: 8px;
       margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .toolbar-left {
+      flex: 1;
+      min-width: 0;
     }
     select, textarea, button {
       font: inherit;
@@ -127,16 +162,22 @@ class FreeAiViewProvider {
       padding: 8px;
     }
     button {
-      width: 100%;
-      margin-top: 8px;
-      padding: 8px;
+      padding: 8px 12px;
       color: var(--vscode-button-foreground);
       background: var(--vscode-button-background);
       border: none;
       cursor: pointer;
+      white-space: nowrap;
     }
     button:hover {
       background: var(--vscode-button-hoverBackground);
+    }
+    #send {
+      width: 100%;
+      margin-top: 8px;
+    }
+    #history {
+      flex-shrink: 0;
     }
     .messages {
       margin-top: 12px;
@@ -156,27 +197,37 @@ class FreeAiViewProvider {
     .ai {
       border-left: 3px solid var(--vscode-charts-green);
     }
+    .assistant {
+      border-left: 3px solid var(--vscode-charts-green);
+    }
     .error {
       border-left: 3px solid var(--vscode-errorForeground);
     }
     .status {
       opacity: 0.8;
     }
+    .empty-history {
+      opacity: 0.75;
+      font-style: italic;
+    }
   </style>
 </head>
 <body>
   <div class="toolbar">
-    <select id="provider" aria-label="Provider">
-      ${providerOption("auto", "Auto", defaultProvider)}
-      ${providerOption("cerebras", "Cerebras", defaultProvider)}
-      ${providerOption("gemini", "Gemini", defaultProvider)}
-      ${providerOption("gemini-fast", "Gemini Fast", defaultProvider)}
-      ${providerOption("groq", "Groq", defaultProvider)}
-      ${providerOption("openrouter", "OpenRouter", defaultProvider)}
-      ${providerOption("ollama", "Ollama", defaultProvider)}
-    </select>
+    <div class="toolbar-left">
+      <select id="provider" aria-label="Provider">
+        ${providerOption("auto", "Auto", defaultProvider)}
+        ${providerOption("cerebras", "Cerebras", defaultProvider)}
+        ${providerOption("gemini", "Gemini", defaultProvider)}
+        ${providerOption("gemini-fast", "Gemini Fast", defaultProvider)}
+        ${providerOption("groq", "Groq", defaultProvider)}
+        ${providerOption("openrouter", "OpenRouter", defaultProvider)}
+        ${providerOption("ollama", "Ollama", defaultProvider)}
+      </select>
+    </div>
+    <button id="history" title="Show local request history">History</button>
   </div>
-  <textarea id="prompt" placeholder="Ask Free AI. It will not edit files."></textarea>
+  <textarea id="prompt" placeholder="Ask Free AI. Type your question here."></textarea>
   <button id="send">Send</button>
   <div id="messages" class="messages"></div>
 
@@ -186,7 +237,11 @@ class FreeAiViewProvider {
     const providerEl = document.getElementById("provider");
     const messagesEl = document.getElementById("messages");
     const sendEl = document.getElementById("send");
-
+    const historyEl = document.getElementById("history");
+    let historyEntries = ${initialHistory};
+    let showingHistory = false;
+    
+    historyEl.addEventListener("click", toggleHistory);
     sendEl.addEventListener("click", send);
     promptEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -202,19 +257,26 @@ class FreeAiViewProvider {
       if (message.type === "answer") {
         clearStatus();
         addMessage("ai", message.text);
+        remember("assistant", message.text);
         sendEl.disabled = false;
       }
       if (message.type === "error") {
         clearStatus();
         addMessage("error", message.text);
+        remember("error", message.text);
         sendEl.disabled = false;
       }
+      
     });
+    
 
     function send() {
       const prompt = promptEl.value.trim();
       if (!prompt) return;
+
       addMessage("user", prompt);
+      remember("user", prompt);
+
       setStatus("Thinking...");
       sendEl.disabled = true;
       vscode.postMessage({
@@ -223,6 +285,36 @@ class FreeAiViewProvider {
         provider: providerEl.value
       });
       promptEl.value = "";
+    }
+
+    function remember(role, text) {
+      historyEntries.push({
+        role,
+        text,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    function toggleHistory() {
+      showingHistory = !showingHistory;
+      historyEl.textContent = showingHistory ? "Chat" : "History";
+      messagesEl.textContent = "";
+
+      if (!showingHistory) {
+        return;
+      }
+
+      const entries = historyEntries.slice(-80).reverse();
+      if (entries.length === 0) {
+        addMessage("status empty-history", "No saved history yet.");
+        return;
+      }
+
+      entries.forEach((entry) => {
+        const stamp = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : "";
+        const label = entry.role === "user" ? "You" : entry.role === "assistant" ? "Free AI" : "Error";
+        addMessage(entry.role === "assistant" ? "ai" : entry.role, stamp ? label + " - " + stamp + "\\n" + entry.text : label + "\\n" + entry.text);
+      });
     }
 
     function addMessage(kind, text) {
@@ -253,6 +345,15 @@ class FreeAiViewProvider {
 
 function providerOption(value, label, selected) {
   return `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`;
+}
+
+function safeJsonForHtml(value) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
 }
 
 async function applyGatewayModel(gatewayUrl, model) {
@@ -294,17 +395,14 @@ function selectProvider(prompt, requestedProvider) {
 }
 
 async function askGateway(gatewayUrl, authToken, prompt) {
-  const safePrompt = `You are the user's separate Free AI assistant.
+  const systemPrompt = `You are the user's separate Free AI assistant.
 
 Important rules:
 - Do not call tools.
 - Do not pretend that you edited files.
 - Do not output fake Write/Edit/Read JSON.
 - If the user asks for code, write code in the chat.
-- If the user asks for architecture, answer in Markdown.
-
-User request:
-${prompt}`;
+- If the user asks for architecture, answer in Markdown.`;
 
   const response = await fetch(`${gatewayUrl}/v1/messages`, {
     method: "POST",
@@ -315,7 +413,11 @@ ${prompt}`;
     body: JSON.stringify({
       model: "claude-3-5-sonnet-20241022",
       max_tokens: 1400,
-      messages: [{ role: "user", content: safePrompt }]
+      system: systemPrompt,
+      messages: [{
+        role: "user",
+        content: String(prompt || "")
+      }]
     })
   });
 
