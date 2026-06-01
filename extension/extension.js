@@ -27,16 +27,37 @@ class FreeAiViewProvider {
     this.extensionUri = extensionUri;
     this.context = context;
     this.view = undefined;
-    this.history = this.loadHistory();
+    this.historyUri = vscode.Uri.joinPath(this.context.globalStorageUri, "history.json");
+    this.history = [];
+    this.historySave = Promise.resolve();
   }
 
-  loadHistory() {
-    const saved = this.context.globalState.get("freeAi.history", []);
-    return saved;
+  async loadHistory() {
+    const fileHistory = await this.readHistoryFile();
+    const legacyHistory = normalizeHistory(this.context.globalState.get("freeAi.history", []));
+    this.history = mergeHistory(fileHistory, legacyHistory);
+
+    if (this.history.length > fileHistory.length || legacyHistory.length > 0) {
+      await this.saveHistory();
+      await this.context.globalState.update("freeAi.history", undefined);
+    }
+  }
+
+  async readHistoryFile() {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(this.historyUri);
+      const raw = Buffer.from(bytes).toString("utf8");
+      const parsed = JSON.parse(raw);
+      return normalizeHistory(parsed);
+    } catch {
+      return [];
+    }
   }
 
   async saveHistory() {
-    await this.context.globalState.update("freeAi.history", this.history);
+    await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
+    const json = JSON.stringify(this.history, null, 2);
+    await vscode.workspace.fs.writeFile(this.historyUri, Buffer.from(json, "utf8"));
   }
 
   addToHistory(role, text) {
@@ -45,7 +66,15 @@ class FreeAiViewProvider {
       text: text,
       timestamp: new Date().toISOString()
     });
-    this.saveHistory();
+    this.queueSaveHistory();
+  }
+
+  queueSaveHistory() {
+    this.historySave = this.historySave
+      .then(() => this.saveHistory())
+      .catch((error) => {
+        console.error("Failed to save Free AI history", error);
+      });
   }
 
   resolveWebviewView(webviewView) {
@@ -55,12 +84,18 @@ class FreeAiViewProvider {
       localResourceRoots: [this.extensionUri]
     };
 
-    webviewView.webview.html = this.getHtml(webviewView.webview);
-
     webviewView.webview.onDidReceiveMessage(async (message) => {
       if (message.type === "ask") {
         await this.answer(message.prompt, message.provider);
       }
+    });
+
+    this.loadHistory().then(() => {
+      webviewView.webview.html = this.getHtml(webviewView.webview);
+    }).catch((error) => {
+      this.history = [];
+      webviewView.webview.html = this.getHtml(webviewView.webview);
+      this.post({ type: "error", text: `Could not load history database: ${getErrorMessage(error)}` });
     });
   }
 
@@ -345,6 +380,36 @@ class FreeAiViewProvider {
 
 function providerOption(value, label, selected) {
   return `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`;
+}
+
+function normalizeHistory(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((entry) => entry && entry.role && typeof entry.text === "string")
+    .map((entry) => ({
+      role: String(entry.role),
+      text: entry.text,
+      timestamp: entry.timestamp || new Date().toISOString()
+    }));
+}
+
+function mergeHistory(primary, secondary) {
+  const seen = new Set();
+  const merged = [];
+
+  for (const entry of [...normalizeHistory(primary), ...normalizeHistory(secondary)]) {
+    const key = `${entry.role}\u0000${entry.timestamp}\u0000${entry.text}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(entry);
+  }
+
+  return merged.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
 }
 
 function safeJsonForHtml(value) {

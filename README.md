@@ -209,6 +209,7 @@ local logs
 
 - All requests and responses are automatically saved locally in VS Code
 - History persists between sessions
+- History is stored in a local `history.json` database in the extension storage folder
 - Click **History** in the Free AI panel to view recent saved messages
 
 Package & install a VSIX
