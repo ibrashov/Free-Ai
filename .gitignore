@@ -9,4 +9,5 @@ node_modules/
 .vscode-test/
 .DS_Store
 Thumbs.db
+admin/
 

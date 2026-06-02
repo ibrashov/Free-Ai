@@ -1,4 +1,5 @@
 const vscode = require("vscode");
+const path = require("path");
 
 const PROVIDER_MODELS = {
   cerebras: "cerebras/gpt-oss-120b",
@@ -30,6 +31,7 @@ class FreeAiViewProvider {
     this.historyUri = vscode.Uri.joinPath(this.context.globalStorageUri, "history.json");
     this.history = [];
     this.historySave = Promise.resolve();
+    this.pendingEdits = new Map();
   }
 
   async loadHistory() {
@@ -86,7 +88,13 @@ class FreeAiViewProvider {
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
       if (message.type === "ask") {
-        await this.answer(message.prompt, message.provider);
+        await this.answer(message.prompt, message.provider, message.displayPrompt, message.attachedFiles);
+      }
+      if (message.type === "pickFiles") {
+        await this.pickFilesForPrompt();
+      }
+      if (message.type === "applyEdit") {
+        await this.applyPendingEdit(message.editId);
       }
     });
 
@@ -101,17 +109,30 @@ class FreeAiViewProvider {
 
   
 
-  async answer(prompt, provider) {
+  async answer(prompt, provider, displayPrompt, attachedFiles) {
     if (!this.view) {
       return;
     }
 
-    const text = String(prompt || "").trim();
+    let text = String(prompt || "").trim();
     if (!text) {
       return;
     }
 
-    this.addToHistory("user", text);
+    let userDisplay = String(displayPrompt || text).trim();
+    let editSourceFiles = Array.isArray(attachedFiles) ? [...attachedFiles] : [];
+
+    const referencedFiles = await this.resolveWorkspaceFileReferences(text);
+    if (referencedFiles.length > 0) {
+      text = appendFilesToPrompt(text, referencedFiles);
+      editSourceFiles = editSourceFiles.concat(referencedFiles.map((file) => ({
+        name: file.name,
+        path: file.path
+      })));
+      userDisplay += "\n\nAuto-read files:\n" + referencedFiles.map((file) => `- ${file.name}${file.truncated ? " (truncated)" : ""}`).join("\n");
+    }
+
+    this.addToHistory("user", userDisplay);
 
     this.post({ type: "status", text: "Thinking..." });
 
@@ -126,10 +147,12 @@ class FreeAiViewProvider {
       this.post({ type: "status", text: `Thinking with ${selectedProvider}...` });
       await applyGatewayModel(gatewayUrl, selectedModel);
       const answer = await askGateway(gatewayUrl, authToken, text);
+      const edits = this.extractAllowedEdits(answer || "", editSourceFiles);
+      const visibleAnswer = stripFileEditBlocks(answer || "(empty response)").trim() || "(edit prepared)";
       
-      this.addToHistory("assistant", answer || "(empty response)");
+      this.addToHistory("assistant", visibleAnswer);
       
-      this.post({ type: "answer", text: answer || "(empty response)" });
+      this.post({ type: "answer", text: visibleAnswer, edits });
     } catch (error) {
       const errorMsg = getErrorMessage(error);
       this.addToHistory("error", errorMsg);
@@ -139,6 +162,171 @@ class FreeAiViewProvider {
 
   post(message) {
     this.view.webview.postMessage(message);
+  }
+
+  async pickFilesForPrompt() {
+    if (!this.view) {
+      return;
+    }
+
+    const uris = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: true,
+      openLabel: "Add file",
+      filters: {
+        "Text/code files": ["txt", "md", "js", "ts", "jsx", "tsx", "dart", "py", "java", "kt", "html", "css", "json", "yaml", "yml", "xml", "csv", "log", "sql"],
+        "All files": ["*"]
+      }
+    });
+
+    if (!uris || uris.length === 0) {
+      return;
+    }
+
+    const maxFiles = 5;
+    const maxCharsPerFile = 50000;
+    const files = [];
+
+    for (const uri of uris.slice(0, maxFiles)) {
+      try {
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        const raw = Buffer.from(bytes).toString("utf8");
+        const text = raw.length > maxCharsPerFile ? raw.slice(0, maxCharsPerFile) : raw;
+        files.push({
+          name: uri.path.split(/[\\/]/).pop() || "file",
+          path: uri.fsPath,
+          size: bytes.byteLength,
+          text,
+          truncated: raw.length > maxCharsPerFile
+        });
+      } catch (error) {
+        this.post({ type: "error", text: `Could not read file: ${getErrorMessage(error)}` });
+      }
+    }
+
+    if (files.length > 0) {
+      this.post({ type: "filesPicked", files });
+    }
+  }
+
+  async resolveWorkspaceFileReferences(prompt) {
+    const refs = extractAtFileReferences(prompt);
+    if (refs.length === 0 || !vscode.workspace.workspaceFolders?.length) {
+      return [];
+    }
+
+    const files = [];
+    const seen = new Set();
+    const maxFiles = 5;
+    const maxCharsPerFile = 50000;
+
+    for (const ref of refs) {
+      if (files.length >= maxFiles) {
+        break;
+      }
+
+      const uri = await findWorkspaceFile(ref);
+      if (!uri || seen.has(uri.fsPath)) {
+        continue;
+      }
+      seen.add(uri.fsPath);
+
+      if (isUnsafeFilePath(uri.fsPath)) {
+        this.post({ type: "status", text: `Skipped protected file reference: ${ref}` });
+        continue;
+      }
+
+      try {
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        const raw = Buffer.from(bytes).toString("utf8");
+        if (raw.includes("\u0000")) {
+          this.post({ type: "status", text: `Skipped binary file reference: ${ref}` });
+          continue;
+        }
+        const text = raw.length > maxCharsPerFile ? raw.slice(0, maxCharsPerFile) : raw;
+        files.push({
+          name: path.basename(uri.fsPath),
+          path: uri.fsPath,
+          size: bytes.byteLength,
+          text,
+          truncated: raw.length > maxCharsPerFile
+        });
+      } catch (error) {
+        this.post({ type: "error", text: `Could not read @${ref}: ${getErrorMessage(error)}` });
+      }
+    }
+
+    return files;
+  }
+
+  extractAllowedEdits(answer, attachedFiles) {
+    const allowed = new Map();
+    for (const file of attachedFiles || []) {
+      if (file && file.path) {
+        allowed.set(normalizeFsPath(file.path), file);
+      }
+    }
+
+    const rawEdits = extractFileEditBlocks(answer);
+    const edits = [];
+    for (const edit of rawEdits) {
+      const normalized = normalizeFsPath(edit.path);
+      if (!normalized || !allowed.has(normalized) || typeof edit.content !== "string") {
+        continue;
+      }
+      const original = allowed.get(normalized);
+      edits.push({
+        path: original.path,
+        name: original.name || edit.path,
+        content: edit.content
+      });
+    }
+
+    if (edits.length === 0) {
+      return [];
+    }
+
+    const editId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    this.pendingEdits.set(editId, edits);
+    return edits.map((edit, index) => ({
+      editId,
+      index,
+      name: edit.name,
+      path: edit.path,
+      size: Buffer.byteLength(edit.content, "utf8")
+    }));
+  }
+
+  async applyPendingEdit(editId) {
+    const edits = this.pendingEdits.get(editId);
+    if (!edits || edits.length === 0) {
+      this.post({ type: "error", text: "No pending edit found. Ask Free AI to generate the edit again." });
+      return;
+    }
+
+    const names = edits.map((edit) => edit.name || edit.path).join(", ");
+    const choice = await vscode.window.showWarningMessage(
+      `Apply Free AI edit to ${edits.length} file(s)? ${names}`,
+      { modal: true },
+      "Apply"
+    );
+    if (choice !== "Apply") {
+      this.post({ type: "status", text: "Edit was not applied." });
+      return;
+    }
+
+    try {
+      for (const edit of edits) {
+        await vscode.workspace.fs.writeFile(vscode.Uri.file(edit.path), Buffer.from(edit.content, "utf8"));
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(edit.path));
+        await vscode.window.showTextDocument(doc, { preview: false });
+      }
+      this.pendingEdits.delete(editId);
+      this.post({ type: "editApplied", text: `Applied edit to ${edits.length} file(s).` });
+    } catch (error) {
+      this.post({ type: "error", text: `Could not apply edit: ${getErrorMessage(error)}` });
+    }
   }
 
   getHtml(webview) {
@@ -211,6 +399,45 @@ class FreeAiViewProvider {
       width: 100%;
       margin-top: 8px;
     }
+    .prompt-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .prompt-actions button {
+      flex: 1;
+    }
+    #send {
+      flex: 2;
+      margin-top: 0;
+    }
+    .attached-files {
+      display: none;
+      margin-top: 8px;
+      padding: 8px;
+      border: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editor-background);
+      font-size: 12px;
+    }
+    .attached-files.visible {
+      display: block;
+    }
+    .file-chip {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 4px 0;
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .file-chip:last-child {
+      border-bottom: 0;
+    }
+    .file-remove {
+      padding: 0 6px;
+      background: transparent;
+      color: var(--vscode-errorForeground);
+      border: 1px solid var(--vscode-panel-border);
+    }
     #history {
       flex-shrink: 0;
     }
@@ -238,6 +465,19 @@ class FreeAiViewProvider {
     .error {
       border-left: 3px solid var(--vscode-errorForeground);
     }
+    .edit-actions {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--vscode-panel-border);
+    }
+    .edit-list {
+      margin: 0 0 8px 0;
+      padding-left: 18px;
+      opacity: 0.85;
+    }
+    .apply-edit {
+      width: 100%;
+    }
     .status {
       opacity: 0.8;
     }
@@ -263,7 +503,11 @@ class FreeAiViewProvider {
     <button id="history" title="Show local request history">History</button>
   </div>
   <textarea id="prompt" placeholder="Ask Free AI. Type your question here."></textarea>
-  <button id="send">Send</button>
+  <div id="attached-files" class="attached-files"></div>
+  <div class="prompt-actions">
+    <button id="add-file" title="Attach text/code files so Free AI can read them">Add file</button>
+    <button id="send">Send</button>
+  </div>
   <div id="messages" class="messages"></div>
 
   <script nonce="${nonce}">
@@ -273,10 +517,16 @@ class FreeAiViewProvider {
     const messagesEl = document.getElementById("messages");
     const sendEl = document.getElementById("send");
     const historyEl = document.getElementById("history");
+    const addFileEl = document.getElementById("add-file");
+    const attachedFilesEl = document.getElementById("attached-files");
     let historyEntries = ${initialHistory};
     let showingHistory = false;
+    let attachedFiles = [];
     
     historyEl.addEventListener("click", toggleHistory);
+    addFileEl.addEventListener("click", () => {
+      vscode.postMessage({ type: "pickFiles" });
+    });
     sendEl.addEventListener("click", send);
     promptEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -291,7 +541,10 @@ class FreeAiViewProvider {
       }
       if (message.type === "answer") {
         clearStatus();
-        addMessage("ai", message.text);
+        const item = addMessage("ai", message.text);
+        if (message.edits && message.edits.length) {
+          attachEditActions(item, message.edits);
+        }
         remember("assistant", message.text);
         sendEl.disabled = false;
       }
@@ -301,25 +554,89 @@ class FreeAiViewProvider {
         remember("error", message.text);
         sendEl.disabled = false;
       }
+      if (message.type === "filesPicked") {
+        attachedFiles = attachedFiles.concat(message.files || []);
+        renderAttachedFiles();
+      }
+      if (message.type === "editApplied") {
+        clearStatus();
+        addMessage("status", message.text);
+      }
       
     });
     
 
     function send() {
-      const prompt = promptEl.value.trim();
-      if (!prompt) return;
+      const basePrompt = promptEl.value.trim();
+      if (!basePrompt && attachedFiles.length === 0) return;
+      const prompt = buildPromptWithFiles(basePrompt);
+      const displayPrompt = buildDisplayPrompt(basePrompt);
 
-      addMessage("user", prompt);
-      remember("user", prompt);
+      addMessage("user", displayPrompt);
+      remember("user", displayPrompt);
 
       setStatus("Thinking...");
       sendEl.disabled = true;
       vscode.postMessage({
         type: "ask",
         prompt,
+        displayPrompt,
+        attachedFiles: attachedFiles.map(file => ({ name: file.name, path: file.path })),
         provider: providerEl.value
       });
       promptEl.value = "";
+      attachedFiles = [];
+      renderAttachedFiles();
+    }
+
+    function buildPromptWithFiles(basePrompt) {
+      if (attachedFiles.length === 0) {
+        return basePrompt;
+      }
+
+      const parts = [basePrompt || "Read the attached file(s) and help me with them."];
+      parts.push("\\nIf I ask you to edit an attached file, return the COMPLETE replacement content for each edited file inside exactly one block like this:");
+      parts.push("<free_ai_file_edits><file path=\\"exact attached file path\\">complete new file content</file></free_ai_file_edits>");
+      parts.push("Only use paths from the attached files. Do not say the edit was applied; VS Code will ask me to confirm.");
+      parts.push("\\n\\n--- ATTACHED FILES ---");
+      attachedFiles.forEach((file, index) => {
+        parts.push("\\n[" + (index + 1) + "] " + file.name + " (" + file.path + ")" + (file.truncated ? " [truncated]" : ""));
+        parts.push("~~~text\\n" + file.text + "\\n~~~");
+      });
+      parts.push("--- END ATTACHED FILES ---");
+      return parts.join("\\n");
+    }
+
+    function buildDisplayPrompt(basePrompt) {
+      if (attachedFiles.length === 0) {
+        return basePrompt;
+      }
+
+      const names = attachedFiles.map(file => "- " + file.name + (file.truncated ? " (truncated)" : "")).join("\\n");
+      return (basePrompt || "Read the attached file(s).") + "\\n\\nAttached files:\\n" + names;
+    }
+
+    function renderAttachedFiles() {
+      attachedFilesEl.textContent = "";
+      attachedFilesEl.classList.toggle("visible", attachedFiles.length > 0);
+
+      attachedFiles.forEach((file, index) => {
+        const row = document.createElement("div");
+        row.className = "file-chip";
+        const name = document.createElement("span");
+        name.textContent = file.name + " (" + Math.ceil((file.size || 0) / 1024) + " KB)" + (file.truncated ? " - truncated" : "");
+        const remove = document.createElement("button");
+        remove.className = "file-remove";
+        remove.textContent = "x";
+        remove.title = "Remove file";
+        remove.addEventListener("click", () => {
+          attachedFiles.splice(index, 1);
+          renderAttachedFiles();
+        });
+        row.appendChild(name);
+        row.appendChild(remove);
+        attachedFilesEl.appendChild(row);
+      });
     }
 
     function remember(role, text) {
@@ -357,6 +674,30 @@ class FreeAiViewProvider {
       item.className = "msg " + kind;
       item.textContent = text;
       messagesEl.prepend(item);
+      return item;
+    }
+
+    function attachEditActions(item, edits) {
+      const wrap = document.createElement("div");
+      wrap.className = "edit-actions";
+      const list = document.createElement("ul");
+      list.className = "edit-list";
+      edits.forEach((edit) => {
+        const li = document.createElement("li");
+        li.textContent = edit.name + " (" + Math.ceil((edit.size || 0) / 1024) + " KB)";
+        list.appendChild(li);
+      });
+      const button = document.createElement("button");
+      button.className = "apply-edit";
+      button.textContent = "Apply edit";
+      button.addEventListener("click", () => {
+        vscode.postMessage({ type: "applyEdit", editId: edits[0].editId });
+        button.disabled = true;
+        button.textContent = "Waiting for confirmation...";
+      });
+      wrap.appendChild(list);
+      wrap.appendChild(button);
+      item.appendChild(wrap);
     }
 
     function setStatus(text) {
@@ -380,6 +721,88 @@ class FreeAiViewProvider {
 
 function providerOption(value, label, selected) {
   return `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`;
+}
+
+function appendFilesToPrompt(basePrompt, files) {
+  if (!files || files.length === 0) {
+    return basePrompt;
+  }
+
+  const parts = [String(basePrompt || "")];
+  parts.push("\nIf I ask you to edit an attached file, return the COMPLETE replacement content for each edited file inside exactly one block like this:");
+  parts.push('<free_ai_file_edits><file path="exact attached file path">complete new file content</file></free_ai_file_edits>');
+  parts.push("Only use paths from the attached files. Do not say the edit was applied; VS Code will ask me to confirm.");
+  parts.push("\n\n--- ATTACHED FILES ---");
+  files.forEach((file, index) => {
+    parts.push(`\n[${index + 1}] ${file.name} (${file.path})${file.truncated ? " [truncated]" : ""}`);
+    parts.push(`~~~text\n${file.text}\n~~~`);
+  });
+  parts.push("--- END ATTACHED FILES ---");
+  return parts.join("\n");
+}
+
+function extractAtFileReferences(prompt) {
+  const refs = [];
+  const seen = new Set();
+  const re = /@([^\s"'`<>|]+(?:\.[A-Za-z0-9_+-]+)?)/g;
+  let match;
+
+  while ((match = re.exec(String(prompt || ""))) !== null) {
+    const ref = match[1].replace(/[),.;:!?]+$/, "");
+    if (!ref || seen.has(ref)) {
+      continue;
+    }
+    seen.add(ref);
+    refs.push(ref);
+  }
+
+  return refs.slice(0, 8);
+}
+
+async function findWorkspaceFile(ref) {
+  const clean = String(ref || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!clean) {
+    return null;
+  }
+
+  if (path.isAbsolute(ref)) {
+    const uri = vscode.Uri.file(ref);
+    return isInsideWorkspace(uri.fsPath) ? uri : null;
+  }
+
+  const exclude = "{**/.git/**,**/node_modules/**,**/.venv/**,**/build/**,**/dist/**,**/.dart_tool/**,**/.pytest_cache/**}";
+  const glob = clean.includes("/") ? clean : `**/${clean}`;
+  const matches = await vscode.workspace.findFiles(glob, exclude, 20);
+  if (!matches.length) {
+    return null;
+  }
+
+  matches.sort((a, b) => {
+    const aExact = path.basename(a.fsPath).toLowerCase() === path.basename(clean).toLowerCase() ? 0 : 1;
+    const bExact = path.basename(b.fsPath).toLowerCase() === path.basename(clean).toLowerCase() ? 0 : 1;
+    if (aExact !== bExact) return aExact - bExact;
+    return a.fsPath.length - b.fsPath.length;
+  });
+  return matches[0];
+}
+
+function isInsideWorkspace(filePath) {
+  const folders = vscode.workspace.workspaceFolders || [];
+  const normalized = normalizeFsPath(filePath);
+  return folders.some((folder) => {
+    const root = normalizeFsPath(folder.uri.fsPath);
+    return normalized === root || normalized.startsWith(root + "/");
+  });
+}
+
+function isUnsafeFilePath(filePath) {
+  const base = path.basename(filePath).toLowerCase();
+  const lower = normalizeFsPath(filePath);
+  if (base === ".env" || base.startsWith(".env.")) {
+    return true;
+  }
+  return /(^|[\/._-])(secret|token|credential|credentials|apikey|api-key|private-key|id_rsa|id_dsa|id_ed25519)([\/._-]|$)/i.test(lower)
+    || /\.(pem|p12|pfx|key)$/i.test(base);
 }
 
 function normalizeHistory(value) {
@@ -464,10 +887,14 @@ async function askGateway(gatewayUrl, authToken, prompt) {
 
 Important rules:
 - Do not call tools.
-- Do not pretend that you edited files.
+- You cannot directly edit files yourself.
 - Do not output fake Write/Edit/Read JSON.
 - If the user asks for code, write code in the chat.
-- If the user asks for architecture, answer in Markdown.`;
+- If the user asks for architecture, answer in Markdown.
+- If the user asks to edit an attached file, return the complete replacement content using exactly this XML-like block:
+<free_ai_file_edits><file path="exact attached file path">complete new file content</file></free_ai_file_edits>
+- Only use paths that appear in the attached file list.
+- Do not claim the edit was applied. The VS Code extension will ask the user to confirm before writing.`;
 
   const response = await fetch(`${gatewayUrl}/v1/messages`, {
     method: "POST",
@@ -517,6 +944,62 @@ function parseSseText(raw) {
     }
   }
   return output.trim();
+}
+
+function stripFileEditBlocks(text) {
+  return String(text || "")
+    .replace(/<free_ai_file_edits>[\s\S]*?<\/free_ai_file_edits>/gi, "")
+    .trim();
+}
+
+function extractFileEditBlocks(text) {
+  const edits = [];
+  const re = /<free_ai_file_edits>([\s\S]*?)<\/free_ai_file_edits>/gi;
+  let match;
+
+  while ((match = re.exec(String(text || ""))) !== null) {
+    const raw = match[1].trim();
+    const fileRe = /<file\s+path=(["'])(.*?)\1>([\s\S]*?)<\/file>/gi;
+    let fileMatch;
+    let foundRawFile = false;
+    while ((fileMatch = fileRe.exec(raw)) !== null) {
+      foundRawFile = true;
+      edits.push({
+        path: decodeHtmlEntities(fileMatch[2]),
+        content: decodeHtmlEntities(fileMatch[3]).replace(/^\r?\n/, "").replace(/\r?\n$/, "")
+      });
+    }
+    if (foundRawFile) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(raw);
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of list) {
+        if (item && typeof item.path === "string" && typeof item.content === "string") {
+          edits.push({ path: item.path, content: item.content });
+        }
+      }
+    } catch {
+      // Ignore malformed edit blocks; the answer text is still shown to the user.
+    }
+  }
+
+  return edits;
+}
+
+function normalizeFsPath(value) {
+  return String(value || "").trim().replace(/\\/g, "/").toLowerCase();
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
 }
 
 function getNonce() {
