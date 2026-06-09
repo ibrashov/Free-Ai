@@ -1,0 +1,86 @@
+[
+  {
+    "id": "gemini-fast",
+    "label": "Gemini Fast",
+    "model": "gemini/models/gemini-2.0-flash",
+    "role": "chat",
+    "costTier": "free-no-card",
+    "quotaType": "free-tier",
+    "supportsTools": false,
+    "supportsOpenCode": false,
+    "priority": 10,
+    "enabled": true
+  },
+  {
+    "id": "gemini",
+    "label": "Gemini",
+    "model": "gemini/models/gemini-2.5-flash",
+    "role": "chat",
+    "costTier": "free-no-card",
+    "quotaType": "free-tier",
+    "supportsTools": false,
+    "supportsOpenCode": false,
+    "priority": 15,
+    "enabled": true
+  },
+  {
+    "id": "cerebras",
+    "label": "Cerebras",
+    "model": "cerebras/gpt-oss-120b",
+    "role": "chat",
+    "costTier": "free-trial",
+    "quotaType": "rpm-tpm-daily",
+    "supportsTools": false,
+    "supportsOpenCode": false,
+    "priority": 20,
+    "enabled": true
+  },
+  {
+    "id": "groq",
+    "label": "Groq",
+    "model": "groq/qwen/qwen3-32b",
+    "role": "chat",
+    "costTier": "free-no-card",
+    "quotaType": "rpm-rpd-tpm-tpd",
+    "supportsTools": false,
+    "supportsOpenCode": false,
+    "priority": 30,
+    "enabled": true
+  },
+  {
+    "id": "openrouter",
+    "label": "OpenRouter",
+    "model": "open_router/google/gemma-4-31b-it:free",
+    "role": "chat",
+    "costTier": "free-no-card",
+    "quotaType": "free-daily-requests",
+    "supportsTools": false,
+    "supportsOpenCode": false,
+    "priority": 40,
+    "enabled": true
+  },
+  {
+    "id": "opencode",
+    "label": "OpenCode Agent",
+    "model": "anthropic/claude-sonnet-4-0",
+    "role": "agent",
+    "costTier": "free-via-gateway",
+    "quotaType": "gateway-provider",
+    "supportsTools": true,
+    "supportsOpenCode": true,
+    "priority": 50,
+    "enabled": true
+  },
+  {
+    "id": "ollama",
+    "label": "Ollama Local",
+    "model": "ollama/qwen2.5-coder:3b",
+    "role": "local-fallback",
+    "costTier": "local-free",
+    "quotaType": "local-hardware",
+    "supportsTools": false,
+    "supportsOpenCode": true,
+    "priority": 90,
+    "enabled": true
+  }
+]
