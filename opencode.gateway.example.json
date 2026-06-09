@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "anthropic": {
+      "options": {
+        "baseURL": "http://127.0.0.1:8082/v1"
+      },
+      "models": {
+        "claude-sonnet-4-0": {
+          "name": "free-claude-code gateway"
+        }
+      }
+    }
+  }
+}

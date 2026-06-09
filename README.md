@@ -18,7 +18,8 @@ http://127.0.0.1:8082
 ## What It Does
 
 - Adds a separate **Free AI** panel inside VS Code.
-- Lets you choose provider: Auto, Cerebras, Gemini, Groq, OpenRouter, Ollama.
+- Lets you choose provider: Auto multi-AI, Cerebras, Gemini, Groq, OpenRouter, Ollama.
+- Opens local Odysseus Chat from VS Code with the **Odysseus** button or command.
 - Saves local request history and lets you view it from the panel.
 - Uses `free-claude-code` as a local proxy.
 - Keeps free AI chat separate from official Claude Code.
@@ -49,6 +50,14 @@ free-claude-code gateway
         |
         v
 Cerebras / Gemini / Groq / OpenRouter / Ollama
+
+Odysseus Chat can run next to it:
+
+VS Code command / Free AI button
+        |
+        v
+Odysseus local UI
+http://127.0.0.1:7000
 ```
 
 ## Folder Structure
@@ -109,6 +118,27 @@ Developer: Reload Window
 
 You should see a new **Free AI** icon in the VS Code Activity Bar.
 
+## Open Odysseus Chat In VS Code
+
+If Odysseus is running locally, use either:
+
+```text
+Free AI panel -> Odysseus
+Ctrl+Shift+P -> Free AI: Open Odysseus Chat
+```
+
+Default URL:
+
+```text
+http://127.0.0.1:7000
+```
+
+Change it in VS Code settings if your Odysseus server uses another address:
+
+```json
+"freeAiConsole.odysseusUrl": "http://127.0.0.1:7000"
+```
+
 ## Start The Gateway
 
 Run:
@@ -160,17 +190,32 @@ Inside the console:
 /exit
 ```
 
-## Auto Router
+## Auto Multi-AI Router
 
-The current Auto mode is intentionally conservative:
+Auto mode now asks several configured providers one after another and shows all successful answers in one response:
 
 ```text
-normal requests -> Cerebras
-offline / local / private / ollama -> Ollama
-default -> Cerebras
+normal requests -> Cerebras, Gemini Fast, Groq, OpenRouter
+offline / local / private / ollama -> Ollama, then Cerebras fallback
 ```
 
-Gemini, Groq, and OpenRouter are still available manually, but Auto avoids them by default because gateway/tool behavior can be less stable.
+The gateway has one active model at a time, so Auto runs providers sequentially instead of switching them in parallel. If one provider fails or hits a free-tier limit, the panel still keeps the other provider answers.
+
+## OpenCode Gateway Experiment
+
+This repo includes an experimental OpenCode config template:
+
+```text
+opencode.gateway.example.json
+```
+
+It points OpenCode's Anthropic provider `baseURL` at the local `free-claude-code` gateway:
+
+```text
+http://127.0.0.1:8082
+```
+
+After installing OpenCode, copy the template to `opencode.json`, run `opencode`, then use `/connect` for Anthropic and try `freecc` as the local gateway key. This depends on how OpenCode sends Anthropic auth headers, so treat it as a compatibility test rather than a guaranteed production setup.
 
 ## Why This Exists
 
@@ -221,10 +266,10 @@ cd .\extension
 npx @vscode/vsce package
 ```
 
-This will create a `.vsix` file inside the `extension` folder (for example `extension/anuar-free-ai-console-0.1.3.vsix`). Install it with:
+This will create a `.vsix` file inside the `extension` folder (for example `extension/anuar-free-ai-console-0.1.5.vsix`). Install it with:
 
 ```powershell
-code --install-extension .\extension\anuar-free-ai-console-0.1.3.vsix
+code --install-extension .\extension\anuar-free-ai-console-0.1.5.vsix
 ```
 
 Configuration
@@ -234,6 +279,7 @@ Set the gateway and token in your User or Workspace settings (Settings UI or `se
 ```json
 "freeAiConsole.gatewayUrl": "http://127.0.0.1:8082",
 "freeAiConsole.authToken": "freecc",
+"freeAiConsole.odysseusUrl": "http://127.0.0.1:7000",
 "freeAiConsole.defaultProvider": "cerebras"
 ```
 

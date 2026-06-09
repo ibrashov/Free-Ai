@@ -39,6 +39,7 @@ Auto Router
 gateway model switching
 SSE response parsing
 chat UI HTML/CSS/JS
+Odysseus Chat launcher
 ```
 
 `scripts/Set-GatewayModel.ps1`
@@ -57,3 +58,8 @@ Copies the extension into:
 %USERPROFILE%\.vscode\extensions\anuar-free-ai-console-0.1.3
 ```
 
+Current version path:
+
+```text
+%USERPROFILE%\.vscode\extensions\anuar-free-ai-console-0.1.5
+```

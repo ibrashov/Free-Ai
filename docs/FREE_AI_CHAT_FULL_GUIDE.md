@@ -140,6 +140,7 @@ freecc
 ```json
 "freeAiConsole.gatewayUrl": "http://127.0.0.1:8082",
 "freeAiConsole.authToken": "freecc",
+"freeAiConsole.odysseusUrl": "http://127.0.0.1:7000",
 "freeAiConsole.defaultProvider": "auto"
 ```
 
@@ -150,7 +151,7 @@ freecc
 ```powershell
 cd C:\Users\Ануар\Desktop\Папки\Anuar\free-ai-vscode-chat\extension
 npx @vscode/vsce package --allow-missing-repository
-code --install-extension .\anuar-free-ai-console-0.1.3.vsix --force
+code --install-extension .\anuar-free-ai-console-0.1.5.vsix --force
 ```
 
 После установки нужно перезагрузить VS Code:
@@ -457,6 +458,8 @@ Odysseus был настроен так, чтобы локальный gateway `
 
 Free AI Chat и Odysseus могут использовать один gateway параллельно.
 
+В версии `0.1.5` в панели Free AI есть кнопка **Odysseus**, а в Command Palette есть команда `Free AI: Open Odysseus Chat`. Они открывают локальный Odysseus UI по настройке `freeAiConsole.odysseusUrl`.
+
 ## 17. Ограничения
 
 Free AI Chat пока не делает:
@@ -671,4 +674,3 @@ Free AI Chat использует бесплатные/локальные мод
 2. Делать git status.
 3. Для кода запускать тесты/анализ.
 ```
-

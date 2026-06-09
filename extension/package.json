@@ -2,7 +2,7 @@
   "name": "anuar-free-ai-console",
   "displayName": "Free AI Console",
   "description": "Separate VS Code panel for the local free-claude-code gateway.",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "publisher": "anuar-local",
   "engines": {
     "vscode": "^1.85.0"

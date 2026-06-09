@@ -10,6 +10,8 @@ const PROVIDER_MODELS = {
   ollama: "ollama/qwen2.5-coder:7b"
 };
 
+const AUTO_PROVIDER_ORDER = ["cerebras", "gemini-fast", "groq", "openrouter"];
+
 function activate(context) {
   const provider = new FreeAiViewProvider(context.extensionUri, context);
   context.subscriptions.push(
@@ -141,14 +143,30 @@ class FreeAiViewProvider {
       const gatewayUrl = config.get("gatewayUrl", "http://127.0.0.1:8082").replace(/\/$/, "");
       const authToken = config.get("authToken", "freecc");
       const requestedProvider = provider || config.get("defaultProvider", "auto");
-      const selectedProvider = selectProvider(text, requestedProvider);
-      const selectedModel = PROVIDER_MODELS[selectedProvider] || PROVIDER_MODELS.cerebras;
+      const selectedProviders = selectProviders(text, requestedProvider);
+      const results = [];
 
-      this.post({ type: "status", text: `Thinking with ${selectedProvider}...` });
-      await applyGatewayModel(gatewayUrl, selectedModel);
-      const answer = await askGateway(gatewayUrl, authToken, text);
-      const edits = this.extractAllowedEdits(answer || "", editSourceFiles);
-      const visibleAnswer = stripFileEditBlocks(answer || "(empty response)").trim() || "(edit prepared)";
+      for (const selectedProvider of selectedProviders) {
+        const selectedModel = PROVIDER_MODELS[selectedProvider] || PROVIDER_MODELS.cerebras;
+        this.post({ type: "status", text: `Thinking with ${selectedProvider}...` });
+
+        try {
+          await applyGatewayModel(gatewayUrl, selectedModel);
+          const answer = await askGateway(gatewayUrl, authToken, text);
+          results.push({ provider: selectedProvider, answer: answer || "" });
+        } catch (error) {
+          results.push({ provider: selectedProvider, error: getErrorMessage(error) });
+        }
+      }
+
+      const successful = results.filter((result) => result.answer);
+      if (successful.length === 0) {
+        const errors = results.map((result) => `${result.provider}: ${result.error || "empty response"}`).join("\n");
+        throw new Error(`All selected providers failed:\n${errors}`);
+      }
+
+      const edits = this.extractFirstAllowedEdits(successful, editSourceFiles);
+      const visibleAnswer = formatProviderResults(results);
       
       this.addToHistory("assistant", visibleAnswer);
       
@@ -298,6 +316,16 @@ class FreeAiViewProvider {
     }));
   }
 
+  extractFirstAllowedEdits(results, attachedFiles) {
+    for (const result of results) {
+      const edits = this.extractAllowedEdits(result.answer || "", attachedFiles);
+      if (edits.length > 0) {
+        return edits;
+      }
+    }
+    return [];
+  }
+
   async applyPendingEdit(editId) {
     const edits = this.pendingEdits.get(editId);
     if (!edits || edits.length === 0) {
@@ -333,7 +361,7 @@ class FreeAiViewProvider {
     const nonce = getNonce();
     const defaultProvider = vscode.workspace
       .getConfiguration("freeAiConsole")
-      .get("defaultProvider", "cerebras");
+      .get("defaultProvider", "auto");
     const initialHistory = safeJsonForHtml(this.history);
 
     return `<!DOCTYPE html>
@@ -438,9 +466,7 @@ class FreeAiViewProvider {
       color: var(--vscode-errorForeground);
       border: 1px solid var(--vscode-panel-border);
     }
-    #history {
-      flex-shrink: 0;
-    }
+    #history,
     .messages {
       margin-top: 12px;
       display: flex;
@@ -491,7 +517,7 @@ class FreeAiViewProvider {
   <div class="toolbar">
     <div class="toolbar-left">
       <select id="provider" aria-label="Provider">
-        ${providerOption("auto", "Auto", defaultProvider)}
+        ${providerOption("auto", "Auto - multi AI", defaultProvider)}
         ${providerOption("cerebras", "Cerebras", defaultProvider)}
         ${providerOption("gemini", "Gemini", defaultProvider)}
         ${providerOption("gemini-fast", "Gemini Fast", defaultProvider)}
@@ -500,7 +526,6 @@ class FreeAiViewProvider {
         ${providerOption("ollama", "Ollama", defaultProvider)}
       </select>
     </div>
-    <button id="history" title="Show local request history">History</button>
   </div>
   <textarea id="prompt" placeholder="Ask Free AI. Type your question here."></textarea>
   <div id="attached-files" class="attached-files"></div>
@@ -523,7 +548,9 @@ class FreeAiViewProvider {
     let showingHistory = false;
     let attachedFiles = [];
     
-    historyEl.addEventListener("click", toggleHistory);
+    if (historyEl) {
+      historyEl.addEventListener("click", toggleHistory);
+    }
     addFileEl.addEventListener("click", () => {
       vscode.postMessage({ type: "pickFiles" });
     });
@@ -648,6 +675,7 @@ class FreeAiViewProvider {
     }
 
     function toggleHistory() {
+      if (!historyEl) return;
       showingHistory = !showingHistory;
       historyEl.textContent = showingHistory ? "Chat" : "History";
       messagesEl.textContent = "";
@@ -868,18 +896,42 @@ async function applyGatewayModel(gatewayUrl, model) {
   }
 }
 
-function selectProvider(prompt, requestedProvider) {
+function selectProviders(prompt, requestedProvider) {
   if (requestedProvider && requestedProvider !== "auto") {
-    return requestedProvider;
+    return [requestedProvider];
   }
 
   const lower = String(prompt || "").toLowerCase();
 
   if (/(offline|local|private|privacy|ollama|локально|офлайн|приват)/i.test(lower)) {
-    return "ollama";
+    return ["ollama", "cerebras"];
   }
 
-  return "cerebras";
+  return AUTO_PROVIDER_ORDER;
+}
+
+function formatProviderResults(results) {
+  return results.map((result) => {
+    const title = `### ${formatProviderName(result.provider)}`;
+    if (result.error) {
+      return `${title}\n\nProvider failed: ${result.error}`;
+    }
+
+    const answer = stripFileEditBlocks(result.answer || "(empty response)").trim() || "(edit prepared)";
+    return `${title}\n\n${answer}`;
+  }).join("\n\n---\n\n");
+}
+
+function formatProviderName(provider) {
+  const names = {
+    cerebras: "Cerebras",
+    gemini: "Gemini",
+    "gemini-fast": "Gemini Fast",
+    groq: "Groq",
+    openrouter: "OpenRouter",
+    ollama: "Ollama"
+  };
+  return names[provider] || provider;
 }
 
 async function askGateway(gatewayUrl, authToken, prompt) {
