@@ -18,7 +18,7 @@ http://127.0.0.1:8082
 ## What It Does
 
 - Adds a separate **Free AI** panel inside VS Code.
-- Lets you choose provider: Auto multi-AI, Cerebras, Gemini, Groq, OpenRouter, Ollama.
+- Lets you choose provider: Auto multi-AI, OpenCode Agent, Cerebras, Gemini, Groq, OpenRouter, Ollama.
 - Opens local Odysseus Chat from VS Code with the **Odysseus** button or command.
 - Saves local request history and lets you view it from the panel.
 - Uses `free-claude-code` as a local proxy.
@@ -196,10 +196,13 @@ Auto mode now asks several configured providers one after another and shows all 
 
 ```text
 normal requests -> Cerebras, Gemini Fast, Groq, OpenRouter
+project / file editing / codebase review requests -> OpenCode Agent
 offline / local / private / ollama -> Ollama, then Cerebras fallback
 ```
 
-The gateway has one active model at a time, so Auto runs providers sequentially instead of switching them in parallel. If one provider fails or hits a free-tier limit, the panel still keeps the other provider answers.
+The gateway has one active model at a time, so Auto runs free providers sequentially instead of switching them in parallel. If one provider fails or hits a free-tier limit, the panel still keeps the other provider answers.
+
+OpenCode Agent is available as a separate provider and is also selected automatically for requests that ask to check the project, read project files, edit files, fix code, or refactor. It runs `opencode run` in the current workspace with the local gateway key.
 
 ## OpenCode Gateway Experiment
 
@@ -266,10 +269,10 @@ cd .\extension
 npx @vscode/vsce package
 ```
 
-This will create a `.vsix` file inside the `extension` folder (for example `extension/anuar-free-ai-console-0.1.5.vsix`). Install it with:
+This will create a `.vsix` file inside the `extension` folder (for example `extension/anuar-free-ai-console-0.1.6.vsix`). Install it with:
 
 ```powershell
-code --install-extension .\extension\anuar-free-ai-console-0.1.5.vsix
+code --install-extension .\extension\anuar-free-ai-console-0.1.6.vsix
 ```
 
 Configuration

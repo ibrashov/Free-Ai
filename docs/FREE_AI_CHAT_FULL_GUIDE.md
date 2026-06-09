@@ -151,7 +151,7 @@ freecc
 ```powershell
 cd C:\Users\Ануар\Desktop\Папки\Anuar\free-ai-vscode-chat\extension
 npx @vscode/vsce package --allow-missing-repository
-code --install-extension .\anuar-free-ai-console-0.1.5.vsix --force
+code --install-extension .\anuar-free-ai-console-0.1.6.vsix --force
 ```
 
 После установки нужно перезагрузить VS Code:

@@ -1,5 +1,9 @@
 const vscode = require("vscode");
 const path = require("path");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+
+const execFileAsync = promisify(execFile);
 
 const PROVIDER_MODELS = {
   cerebras: "cerebras/gpt-oss-120b",
@@ -11,6 +15,8 @@ const PROVIDER_MODELS = {
 };
 
 const AUTO_PROVIDER_ORDER = ["cerebras", "gemini-fast", "groq", "openrouter"];
+const OPENCODE_PROVIDER = "opencode";
+const OPENCODE_MODEL = "anthropic/claude-sonnet-4-0";
 
 function activate(context) {
   const provider = new FreeAiViewProvider(context.extensionUri, context);
@@ -142,17 +148,19 @@ class FreeAiViewProvider {
       const config = vscode.workspace.getConfiguration("freeAiConsole");
       const gatewayUrl = config.get("gatewayUrl", "http://127.0.0.1:8082").replace(/\/$/, "");
       const authToken = config.get("authToken", "freecc");
+      const openCodeCommand = config.get("openCodeCommand", getDefaultOpenCodeCommand());
+      const openCodeModel = config.get("openCodeModel", OPENCODE_MODEL);
       const requestedProvider = provider || config.get("defaultProvider", "auto");
       const selectedProviders = selectProviders(text, requestedProvider);
       const results = [];
 
       for (const selectedProvider of selectedProviders) {
-        const selectedModel = PROVIDER_MODELS[selectedProvider] || PROVIDER_MODELS.cerebras;
-        this.post({ type: "status", text: `Thinking with ${selectedProvider}...` });
+        this.post({ type: "status", text: `Thinking with ${formatProviderName(selectedProvider)}...` });
 
         try {
-          await applyGatewayModel(gatewayUrl, selectedModel);
-          const answer = await askGateway(gatewayUrl, authToken, text);
+          const answer = selectedProvider === OPENCODE_PROVIDER
+            ? await askOpenCode(openCodeCommand, openCodeModel, authToken, text)
+            : await askFreeProvider(gatewayUrl, authToken, selectedProvider, text);
           results.push({ provider: selectedProvider, answer: answer || "" });
         } catch (error) {
           results.push({ provider: selectedProvider, error: getErrorMessage(error) });
@@ -229,7 +237,7 @@ class FreeAiViewProvider {
   }
 
   async resolveWorkspaceFileReferences(prompt) {
-    const refs = extractAtFileReferences(prompt);
+    const refs = extractWorkspaceFileReferences(prompt);
     if (refs.length === 0 || !vscode.workspace.workspaceFolders?.length) {
       return [];
     }
@@ -518,6 +526,7 @@ class FreeAiViewProvider {
     <div class="toolbar-left">
       <select id="provider" aria-label="Provider">
         ${providerOption("auto", "Auto - multi AI", defaultProvider)}
+        ${providerOption("opencode", "OpenCode Agent", defaultProvider)}
         ${providerOption("cerebras", "Cerebras", defaultProvider)}
         ${providerOption("gemini", "Gemini", defaultProvider)}
         ${providerOption("gemini-fast", "Gemini Fast", defaultProvider)}
@@ -787,6 +796,31 @@ function extractAtFileReferences(prompt) {
   return refs.slice(0, 8);
 }
 
+function extractWorkspaceFileReferences(prompt) {
+  const refs = [];
+  const seen = new Set();
+
+  for (const ref of extractAtFileReferences(prompt)) {
+    if (!seen.has(ref)) {
+      seen.add(ref);
+      refs.push(ref);
+    }
+  }
+
+  const re = /(?:^|[\s"'`(])([A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+)*\.[A-Za-z0-9_+-]{1,12})(?=$|[\s"'`),.;:!?])/g;
+  let match;
+  while ((match = re.exec(String(prompt || ""))) !== null) {
+    const ref = match[1].replace(/[),.;:!?]+$/, "");
+    if (!ref || ref.startsWith("http") || seen.has(ref)) {
+      continue;
+    }
+    seen.add(ref);
+    refs.push(ref);
+  }
+
+  return refs.slice(0, 8);
+}
+
 async function findWorkspaceFile(ref) {
   const clean = String(ref || "").trim().replace(/\\/g, "/").replace(/^\/+/, "");
   if (!clean) {
@@ -896,6 +930,54 @@ async function applyGatewayModel(gatewayUrl, model) {
   }
 }
 
+async function askFreeProvider(gatewayUrl, authToken, provider, prompt) {
+  const selectedModel = PROVIDER_MODELS[provider] || PROVIDER_MODELS.cerebras;
+  await applyGatewayModel(gatewayUrl, selectedModel);
+  return askGateway(gatewayUrl, authToken, prompt);
+}
+
+async function askOpenCode(openCodeCommand, openCodeModel, authToken, prompt) {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    throw new Error("OpenCode Agent needs an open workspace folder.");
+  }
+
+  const agentPrompt = [
+    "You are being called from the user's Free AI VS Code panel.",
+    "Read project files when the request asks about files, code, or project review.",
+    "If the user explicitly asks to fix/edit/change files, make the smallest useful edits and then summarize what changed.",
+    "If the request is only a question or review, answer in chat without editing files.",
+    "",
+    "User request:",
+    String(prompt || "")
+  ].join("\n");
+
+  const { stdout, stderr } = await execFileAsync(
+    normalizeOpenCodeCommand(openCodeCommand),
+    ["run", agentPrompt, "-m", openCodeModel || OPENCODE_MODEL],
+    {
+      cwd: workspaceFolder.uri.fsPath,
+      env: {
+        ...process.env,
+        ANTHROPIC_API_KEY: authToken || "freecc"
+      },
+      maxBuffer: 1024 * 1024 * 8,
+      timeout: 180000,
+      windowsHide: true
+    }
+  );
+
+  const output = cleanTerminalText(stdout || "").trim();
+  const errorOutput = cleanTerminalText(stderr || "").trim();
+  if (output) {
+    return output;
+  }
+  if (errorOutput) {
+    return errorOutput;
+  }
+  return "(OpenCode finished without text output)";
+}
+
 function selectProviders(prompt, requestedProvider) {
   if (requestedProvider && requestedProvider !== "auto") {
     return [requestedProvider];
@@ -903,11 +985,19 @@ function selectProviders(prompt, requestedProvider) {
 
   const lower = String(prompt || "").toLowerCase();
 
+  if (shouldUseOpenCodeAgent(lower)) {
+    return [OPENCODE_PROVIDER];
+  }
+
   if (/(offline|local|private|privacy|ollama|локально|офлайн|приват)/i.test(lower)) {
     return ["ollama", "cerebras"];
   }
 
   return AUTO_PROVIDER_ORDER;
+}
+
+function shouldUseOpenCodeAgent(lowerPrompt) {
+  return /(project|codebase|workspace|repo|repository|read files|check files|review project|fix|edit|change|modify|refactor|проект|кодбейс|репозитор|прочитай файл|прочитай файлы|проверь проект|проверь код|исправь|измени|отредактируй|рефактор)/i.test(lowerPrompt);
 }
 
 function formatProviderResults(results) {
@@ -929,9 +1019,28 @@ function formatProviderName(provider) {
     "gemini-fast": "Gemini Fast",
     groq: "Groq",
     openrouter: "OpenRouter",
-    ollama: "Ollama"
+    ollama: "Ollama",
+    opencode: "OpenCode Agent"
   };
   return names[provider] || provider;
+}
+
+function getDefaultOpenCodeCommand() {
+  return process.platform === "win32" ? "opencode.cmd" : "opencode";
+}
+
+function normalizeOpenCodeCommand(command) {
+  const value = String(command || "").trim();
+  if (process.platform === "win32" && (!value || value.toLowerCase() === "opencode")) {
+    return "opencode.cmd";
+  }
+  return value || getDefaultOpenCodeCommand();
+}
+
+function cleanTerminalText(value) {
+  return String(value || "")
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .trim();
 }
 
 async function askGateway(gatewayUrl, authToken, prompt) {

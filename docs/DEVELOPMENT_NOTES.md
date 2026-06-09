@@ -61,5 +61,5 @@ Copies the extension into:
 Current version path:
 
 ```text
-%USERPROFILE%\.vscode\extensions\anuar-free-ai-console-0.1.5
+%USERPROFILE%\.vscode\extensions\anuar-free-ai-console-0.1.6
 ```

@@ -2,7 +2,7 @@
   "name": "anuar-free-ai-console",
   "displayName": "Free AI Console",
   "description": "Separate VS Code panel for the local free-claude-code gateway.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "anuar-local",
   "engines": {
     "vscode": "^1.85.0"
@@ -59,6 +59,7 @@
           "default": "auto",
           "enum": [
             "auto",
+            "opencode",
             "cerebras",
             "gemini",
             "gemini-fast",
@@ -67,6 +68,16 @@
             "ollama"
           ],
           "description": "Default provider for Free AI Console."
+        },
+        "freeAiConsole.openCodeCommand": {
+          "type": "string",
+          "default": "opencode",
+          "description": "OpenCode command used by the OpenCode Agent provider."
+        },
+        "freeAiConsole.openCodeModel": {
+          "type": "string",
+          "default": "anthropic/claude-sonnet-4-0",
+          "description": "OpenCode model in provider/model format."
         }
       }
     }

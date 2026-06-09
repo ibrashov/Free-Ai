@@ -1,6 +1,6 @@
 param(
     [string]$Source = (Join-Path (Split-Path -Parent $PSScriptRoot) "extension"),
-    [string]$Destination = (Join-Path $env:USERPROFILE ".vscode\extensions\anuar-free-ai-console-0.1.5")
+    [string]$Destination = (Join-Path $env:USERPROFILE ".vscode\extensions\anuar-free-ai-console-0.1.6")
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,6 +35,11 @@ if (Test-Path $oldExtension) {
 }
 
 $oldExtension = Join-Path $env:USERPROFILE ".vscode\extensions\anuar-free-ai-console-0.1.4"
+if (Test-Path $oldExtension) {
+    Remove-Item -LiteralPath $oldExtension -Recurse -Force
+}
+
+$oldExtension = Join-Path $env:USERPROFILE ".vscode\extensions\anuar-free-ai-console-0.1.5"
 if (Test-Path $oldExtension) {
     Remove-Item -LiteralPath $oldExtension -Recurse -Force
 }
