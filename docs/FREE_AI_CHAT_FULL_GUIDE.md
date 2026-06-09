@@ -151,7 +151,7 @@ freecc
 ```powershell
 cd C:\Users\Ануар\Desktop\Папки\Anuar\free-ai-vscode-chat\extension
 npx @vscode/vsce package --allow-missing-repository
-code --install-extension .\anuar-free-ai-console-0.1.6.vsix --force
+code --install-extension .\anuar-free-ai-console-0.2.0.vsix --force
 ```
 
 После установки нужно перезагрузить VS Code:
@@ -458,7 +458,7 @@ Odysseus был настроен так, чтобы локальный gateway `
 
 Free AI Chat и Odysseus могут использовать один gateway параллельно.
 
-В версии `0.1.5` в панели Free AI есть кнопка **Odysseus**, а в Command Palette есть команда `Free AI: Open Odysseus Chat`. Они открывают локальный Odysseus UI по настройке `freeAiConsole.odysseusUrl`.
+В версии `0.2.0` в панели Free AI есть кнопка **Odysseus**, а в Command Palette есть команда `Free AI: Open Odysseus Chat`. Они открывают локальный Odysseus UI по настройке `freeAiConsole.odysseusUrl`.
 
 ## 17. Ограничения
 

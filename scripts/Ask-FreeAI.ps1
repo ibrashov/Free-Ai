@@ -39,7 +39,7 @@ if (-not [string]::IsNullOrWhiteSpace($SelectedProvider)) {
         "gemini-fast" = "gemini/models/gemini-2.0-flash"
         "groq"        = "groq/qwen/qwen3-32b"
         "cerebras"    = "cerebras/gpt-oss-120b"
-        "ollama"      = "ollama/qwen2.5-coder:7b"
+        "ollama"      = "ollama/qwen2.5-coder:3b"
     }
     $expectedModel = $expectedModels[$SelectedProvider]
     $envPath = Join-Path $env:USERPROFILE ".fcc\.env"

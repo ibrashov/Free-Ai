@@ -18,7 +18,8 @@ http://127.0.0.1:8082
 ## What It Does
 
 - Adds a separate **Free AI** panel inside VS Code.
-- Lets you choose provider: Auto multi-AI, OpenCode Agent, Cerebras, Gemini, Groq, OpenRouter, Ollama.
+- Lets you choose provider: Auto, OpenCode Agent, Cerebras, Gemini, Groq, OpenRouter, Ollama.
+- Uses quota-aware routing with cooldowns and local Ollama fallback.
 - Opens local Odysseus Chat from VS Code with the **Odysseus** button or command.
 - Saves local request history and lets you view it from the panel.
 - Uses `free-claude-code` as a local proxy.
@@ -190,19 +191,41 @@ Inside the console:
 /exit
 ```
 
-## Auto Multi-AI Router
+## Auto Router
 
-Auto mode now asks several configured providers one after another and shows all successful answers in one response:
+Auto mode is local-first and quota-aware:
 
 ```text
-normal requests -> Cerebras, Gemini Fast, Groq, OpenRouter
+balanced simple requests -> one cheap cloud provider, then Ollama fallback
+compare mode -> several cloud providers
 project / file editing / codebase review requests -> OpenCode Agent
-offline / local / private / ollama -> Ollama, then Cerebras fallback
+offline / local / private / ollama -> Ollama
+survival mode -> Ollama only
 ```
 
-The gateway has one active model at a time, so Auto runs free providers sequentially instead of switching them in parallel. If one provider fails or hits a free-tier limit, the panel still keeps the other provider answers.
+If a provider returns quota/rate-limit errors, Free AI Console puts it in cooldown and avoids it temporarily. The gateway has one active model at a time, so compare mode runs providers sequentially.
 
-OpenCode Agent is available as a separate provider and is also selected automatically for requests that ask to check the project, read project files, edit files, fix code, or refactor. It runs `opencode run` in the current workspace with the local gateway key.
+OpenCode Agent is available as a separate provider and is also selected automatically for requests that ask to check the project, edit files, fix code, or refactor. If OpenCode's cloud/gateway model is rate-limited, it can retry through local Ollama.
+
+## Provider Tools
+
+Command Palette:
+
+```text
+Free AI: Refresh Free Models
+Free AI: Test Providers
+Free AI: Open Provider Status
+```
+
+The refresh command stores discovered model candidates locally in VS Code extension storage. Candidates are not enabled automatically.
+
+## Free Limits And Local Survival
+
+For the current no-card strategy, provider limits, and the Ollama repair workflow, see:
+
+```text
+docs/FREE_LIMITS_AND_LOCAL_SURVIVAL.md
+```
 
 ## OpenCode Gateway Experiment
 
@@ -269,10 +292,10 @@ cd .\extension
 npx @vscode/vsce package
 ```
 
-This will create a `.vsix` file inside the `extension` folder (for example `extension/anuar-free-ai-console-0.1.6.vsix`). Install it with:
+This will create a `.vsix` file inside the `extension` folder (for example `extension/anuar-free-ai-console-0.2.0.vsix`). Install it with:
 
 ```powershell
-code --install-extension .\extension\anuar-free-ai-console-0.1.6.vsix
+code --install-extension .\extension\anuar-free-ai-console-0.2.0.vsix
 ```
 
 Configuration
@@ -283,7 +306,12 @@ Set the gateway and token in your User or Workspace settings (Settings UI or `se
 "freeAiConsole.gatewayUrl": "http://127.0.0.1:8082",
 "freeAiConsole.authToken": "freecc",
 "freeAiConsole.odysseusUrl": "http://127.0.0.1:7000",
-"freeAiConsole.defaultProvider": "cerebras"
+"freeAiConsole.defaultProvider": "auto",
+"freeAiConsole.autoMode": "balanced",
+"freeAiConsole.freePolicy": "no-card",
+"freeAiConsole.openCodeFallbackToOllama": true,
+"freeAiConsole.providerCooldownMinutes": 10,
+"freeAiConsole.localCoderModel": "ollama/qwen2.5-coder:3b"
 ```
 
 If you want me to install the generated VSIX now or launch the Extension Development Host for a quick interactive test, say which one and I'll proceed.

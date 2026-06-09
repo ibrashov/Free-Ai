@@ -31,11 +31,12 @@ Ollama
 Use this order for the current setup:
 
 ```text
-1. Cerebras    - best current default for Free AI and Claude Code compatibility
-2. OpenRouter  - useful fallback, but free models can hit provider limits
-3. Gemini      - good for normal chat, but can fail on tool_calls in Claude Code
-4. Groq        - very fast, but some models behave poorly with tool calls
-5. Ollama      - local fallback, slower and less stable in Claude Code
+1. Gemini Fast - cheap default for simple chat
+2. Cerebras    - strong fallback for normal chat
+3. Groq        - fast fallback, but token-per-minute limits can hit quickly
+4. OpenRouter  - useful free-model fallback, but daily free requests are limited
+5. Ollama      - local survival fallback, no API quota
+6. OpenCode    - project/file agent mode, with Ollama fallback when cloud is rate-limited
 ```
 
 ## Switch Active Gateway Model
@@ -72,14 +73,14 @@ This prints provider status and model names, but does not print API keys.
 
 ## Suggested Usage
 
-For Claude Code in VS Code:
+For Free AI Console in VS Code:
 
 ```text
-Start with Cerebras.
-Use Gemini for normal chat/brief generation, not as the first file-editing agent.
-Use Groq for short experiments.
-Use OpenRouter when you want to try its free model list.
-Use Ollama only when you need local/offline fallback.
+Use Auto balanced for normal questions.
+Use Auto compare only when you really want multiple model opinions.
+Use survival mode when cloud quotas are exhausted.
+Use OpenCode Agent for project-wide review or edits.
+Use Ollama local fallback when you need long free sessions.
 ```
 
 For real file editing, Codex is still the most reliable executor.

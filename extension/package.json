@@ -2,7 +2,7 @@
   "name": "anuar-free-ai-console",
   "displayName": "Free AI Console",
   "description": "Separate VS Code panel for the local free-claude-code gateway.",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "publisher": "anuar-local",
   "engines": {
     "vscode": "^1.85.0"
@@ -13,7 +13,10 @@
   "activationEvents": [
     "*",
     "onView:freeAiConsole.chatView",
-    "onCommand:freeAiConsole.openChat"
+    "onCommand:freeAiConsole.openChat",
+    "onCommand:freeAiConsole.refreshFreeModels",
+    "onCommand:freeAiConsole.testProviders",
+    "onCommand:freeAiConsole.openProviderStatus"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -21,6 +24,18 @@
       {
         "command": "freeAiConsole.openChat",
         "title": "Free AI: Open Chat"
+      },
+      {
+        "command": "freeAiConsole.refreshFreeModels",
+        "title": "Free AI: Refresh Free Models"
+      },
+      {
+        "command": "freeAiConsole.testProviders",
+        "title": "Free AI: Test Providers"
+      },
+      {
+        "command": "freeAiConsole.openProviderStatus",
+        "title": "Free AI: Open Provider Status"
       }
     ],
     "viewsContainers": {
@@ -69,6 +84,25 @@
           ],
           "description": "Default provider for Free AI Console."
         },
+        "freeAiConsole.freePolicy": {
+          "type": "string",
+          "default": "no-card",
+          "enum": [
+            "no-card",
+            "free-tier"
+          ],
+          "description": "Free usage policy for auto routing."
+        },
+        "freeAiConsole.autoMode": {
+          "type": "string",
+          "default": "balanced",
+          "enum": [
+            "balanced",
+            "compare",
+            "survival"
+          ],
+          "description": "Auto routing mode. Balanced uses one cheap provider plus fallback; compare asks several providers; survival uses local Ollama."
+        },
         "freeAiConsole.openCodeCommand": {
           "type": "string",
           "default": "opencode",
@@ -78,6 +112,22 @@
           "type": "string",
           "default": "anthropic/claude-sonnet-4-0",
           "description": "OpenCode model in provider/model format."
+        },
+        "freeAiConsole.openCodeFallbackToOllama": {
+          "type": "boolean",
+          "default": true,
+          "description": "Retry OpenCode with the local Ollama model when the gateway/cloud provider is rate limited."
+        },
+        "freeAiConsole.providerCooldownMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "Minutes to avoid a provider after rate limit or provider failure."
+        },
+        "freeAiConsole.localCoderModel": {
+          "type": "string",
+          "default": "ollama/qwen2.5-coder:3b",
+          "description": "Local Ollama model used for survival mode and OpenCode fallback."
         }
       }
     }

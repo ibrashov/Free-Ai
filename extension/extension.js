@@ -2,21 +2,15 @@ const vscode = require("vscode");
 const path = require("path");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
+const providerCatalog = require("./provider-catalog.json");
 
 const execFileAsync = promisify(execFile);
 
-const PROVIDER_MODELS = {
-  cerebras: "cerebras/gpt-oss-120b",
-  gemini: "gemini/models/gemini-2.5-flash",
-  "gemini-fast": "gemini/models/gemini-2.0-flash",
-  groq: "groq/qwen/qwen3-32b",
-  openrouter: "open_router/google/gemma-4-31b-it:free",
-  ollama: "ollama/qwen2.5-coder:7b"
-};
-
-const AUTO_PROVIDER_ORDER = ["cerebras", "gemini-fast", "groq", "openrouter"];
 const OPENCODE_PROVIDER = "opencode";
 const OPENCODE_MODEL = "anthropic/claude-sonnet-4-0";
+const DEFAULT_LOCAL_CODER_MODEL = "ollama/qwen2.5-coder:3b";
+const PROVIDER_STATE_KEY = "freeAi.providerState";
+const DISCOVERY_FILE = "provider-candidates.json";
 
 function activate(context) {
   const provider = new FreeAiViewProvider(context.extensionUri, context);
@@ -27,6 +21,18 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("freeAiConsole.openChat", async () => {
       await vscode.commands.executeCommand("workbench.view.extension.freeAiConsole");
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("freeAiConsole.refreshFreeModels", async () => {
+      await provider.refreshFreeModels();
+    }),
+    vscode.commands.registerCommand("freeAiConsole.testProviders", async () => {
+      await provider.testProviders();
+    }),
+    vscode.commands.registerCommand("freeAiConsole.openProviderStatus", async () => {
+      await provider.openProviderStatus();
     })
   );
 }
@@ -40,6 +46,8 @@ class FreeAiViewProvider {
     this.history = [];
     this.historySave = Promise.resolve();
     this.pendingEdits = new Map();
+    this.providerState = normalizeProviderState(this.context.globalState.get(PROVIDER_STATE_KEY, {}));
+    this.discoveryUri = vscode.Uri.joinPath(this.context.globalStorageUri, DISCOVERY_FILE);
   }
 
   async loadHistory() {
@@ -104,6 +112,15 @@ class FreeAiViewProvider {
       if (message.type === "applyEdit") {
         await this.applyPendingEdit(message.editId);
       }
+      if (message.type === "refreshModels") {
+        await this.refreshFreeModels();
+      }
+      if (message.type === "testProviders") {
+        await this.testProviders();
+      }
+      if (message.type === "showProviderStatus") {
+        await this.openProviderStatus();
+      }
     });
 
     this.loadHistory().then(() => {
@@ -127,10 +144,12 @@ class FreeAiViewProvider {
       return;
     }
 
+    const routeText = text;
     let userDisplay = String(displayPrompt || text).trim();
     let editSourceFiles = Array.isArray(attachedFiles) ? [...attachedFiles] : [];
 
     const referencedFiles = await this.resolveWorkspaceFileReferences(text);
+    const hasReferencedFiles = referencedFiles.length > 0 || editSourceFiles.length > 0;
     if (referencedFiles.length > 0) {
       text = appendFilesToPrompt(text, referencedFiles);
       editSourceFiles = editSourceFiles.concat(referencedFiles.map((file) => ({
@@ -145,25 +164,48 @@ class FreeAiViewProvider {
     this.post({ type: "status", text: "Thinking..." });
 
     try {
-      const config = vscode.workspace.getConfiguration("freeAiConsole");
-      const gatewayUrl = config.get("gatewayUrl", "http://127.0.0.1:8082").replace(/\/$/, "");
-      const authToken = config.get("authToken", "freecc");
-      const openCodeCommand = config.get("openCodeCommand", getDefaultOpenCodeCommand());
-      const openCodeModel = config.get("openCodeModel", OPENCODE_MODEL);
-      const requestedProvider = provider || config.get("defaultProvider", "auto");
-      const selectedProviders = selectProviders(text, requestedProvider);
+      const config = this.getConfig();
+      const requestedProvider = provider || config.defaultProvider;
+      const route = selectRoute({
+        prompt: routeText,
+        requestedProvider,
+        autoMode: config.autoMode,
+        catalog: this.getCatalog(config),
+        providerState: this.providerState,
+        hasReferencedFiles
+      });
       const results = [];
+      this.postProviderStatus({
+        mode: route.mode,
+        reason: route.reason,
+        providers: route.providers.map((item) => item.label)
+      });
 
-      for (const selectedProvider of selectedProviders) {
-        this.post({ type: "status", text: `Thinking with ${formatProviderName(selectedProvider)}...` });
+      for (const selectedProvider of route.providers) {
+        this.post({ type: "status", text: `${route.mode}: ${selectedProvider.label} (${route.reason})...` });
 
         try {
-          const answer = selectedProvider === OPENCODE_PROVIDER
-            ? await askOpenCode(openCodeCommand, openCodeModel, authToken, text)
-            : await askFreeProvider(gatewayUrl, authToken, selectedProvider, text);
-          results.push({ provider: selectedProvider, answer: answer || "" });
+          const answer = selectedProvider.id === OPENCODE_PROVIDER
+            ? await askOpenCode({
+              command: config.openCodeCommand,
+              model: config.openCodeModel,
+              localModel: config.localCoderModel,
+              authToken: config.authToken,
+              prompt: text,
+              fallbackToOllama: config.openCodeFallbackToOllama
+            })
+            : await askFreeProvider(config.gatewayUrl, config.authToken, selectedProvider, text, config.localCoderModel);
+          if (!String(answer || "").trim()) {
+            throw new Error("empty response");
+          }
+          await this.markProviderReady(selectedProvider.id);
+          results.push({ provider: selectedProvider.id, answer: answer || "" });
+          if (!route.compare) {
+            break;
+          }
         } catch (error) {
-          results.push({ provider: selectedProvider, error: getErrorMessage(error) });
+          await this.markProviderFailure(selectedProvider.id, error, config.providerCooldownMinutes);
+          results.push({ provider: selectedProvider.id, error: getErrorMessage(error) });
         }
       }
 
@@ -179,6 +221,7 @@ class FreeAiViewProvider {
       this.addToHistory("assistant", visibleAnswer);
       
       this.post({ type: "answer", text: visibleAnswer, edits });
+      this.postProviderStatus();
     } catch (error) {
       const errorMsg = getErrorMessage(error);
       this.addToHistory("error", errorMsg);
@@ -188,6 +231,132 @@ class FreeAiViewProvider {
 
   post(message) {
     this.view.webview.postMessage(message);
+  }
+
+  getConfig() {
+    const config = vscode.workspace.getConfiguration("freeAiConsole");
+    return {
+      gatewayUrl: config.get("gatewayUrl", "http://127.0.0.1:8082").replace(/\/$/, ""),
+      authToken: config.get("authToken", "freecc"),
+      defaultProvider: config.get("defaultProvider", "auto"),
+      autoMode: config.get("autoMode", "balanced"),
+      freePolicy: config.get("freePolicy", "no-card"),
+      openCodeCommand: config.get("openCodeCommand", getDefaultOpenCodeCommand()),
+      openCodeModel: config.get("openCodeModel", OPENCODE_MODEL),
+      openCodeFallbackToOllama: config.get("openCodeFallbackToOllama", true),
+      providerCooldownMinutes: config.get("providerCooldownMinutes", 10),
+      localCoderModel: config.get("localCoderModel", DEFAULT_LOCAL_CODER_MODEL)
+    };
+  }
+
+  getCatalog(config = this.getConfig()) {
+    return buildProviderCatalog(config);
+  }
+
+  async saveProviderState() {
+    await this.context.globalState.update(PROVIDER_STATE_KEY, this.providerState);
+  }
+
+  async markProviderReady(providerId) {
+    const current = this.providerState[providerId] || {};
+    this.providerState[providerId] = {
+      ...current,
+      status: providerId === "ollama" ? "Local" : "Ready",
+      lastError: "",
+      cooldownUntil: 0,
+      updatedAt: new Date().toISOString()
+    };
+    await this.saveProviderState();
+  }
+
+  async markProviderFailure(providerId, error, cooldownMinutes) {
+    const message = getErrorMessage(error);
+    const rateLimited = isQuotaOrRateLimitError(message);
+    const minutes = Math.max(1, Number(cooldownMinutes || 10));
+    const cooldownUntil = Date.now() + minutes * 60 * 1000;
+    this.providerState[providerId] = {
+      status: rateLimited ? "Rate limited" : "Cooling down",
+      lastError: message,
+      cooldownUntil,
+      updatedAt: new Date().toISOString()
+    };
+    await this.saveProviderState();
+  }
+
+  getProviderStatusLines(config = this.getConfig()) {
+    return this.getCatalog(config).map((provider) => {
+      const state = getProviderRuntimeState(provider, this.providerState);
+      const model = provider.id === "ollama" ? config.localCoderModel : provider.model;
+      const until = state.cooldownUntil > Date.now()
+        ? ` until ${new Date(state.cooldownUntil).toLocaleTimeString()}`
+        : "";
+      const detail = state.lastError ? ` - ${state.lastError}` : "";
+      return `${provider.label}: ${state.status}${until} (${provider.role}, ${model})${detail}`;
+    });
+  }
+
+  postProviderStatus(route) {
+    if (!this.view) {
+      return;
+    }
+    this.post({
+      type: "providerStatus",
+      route,
+      providers: this.getProviderStatusLines()
+    });
+  }
+
+  async openProviderStatus() {
+    const content = [
+      "# Free AI Provider Status",
+      "",
+      ...this.getProviderStatusLines().map((line) => `- ${line}`)
+    ].join("\n");
+    const doc = await vscode.workspace.openTextDocument({ content, language: "markdown" });
+    await vscode.window.showTextDocument(doc, { preview: true });
+    this.postProviderStatus();
+  }
+
+  async testProviders() {
+    const config = this.getConfig();
+    const catalog = this.getCatalog(config).filter((provider) => provider.enabled);
+    const results = [];
+    this.post({ type: "status", text: "Testing Free AI providers..." });
+
+    for (const provider of catalog) {
+      try {
+        const answer = provider.id === OPENCODE_PROVIDER
+          ? await askOpenCode({
+            command: config.openCodeCommand,
+            model: config.openCodeModel,
+            localModel: config.localCoderModel,
+            authToken: config.authToken,
+            prompt: "Reply with exactly OK.",
+            fallbackToOllama: config.openCodeFallbackToOllama
+          })
+          : await askFreeProvider(config.gatewayUrl, config.authToken, provider, "Reply with exactly OK.", config.localCoderModel, 40);
+        await this.markProviderReady(provider.id);
+        results.push(`${provider.label}: OK${answer ? ` - ${String(answer).slice(0, 80)}` : ""}`);
+      } catch (error) {
+        await this.markProviderFailure(provider.id, error, config.providerCooldownMinutes);
+        results.push(`${provider.label}: ${getErrorMessage(error)}`);
+      }
+    }
+
+    const text = results.join("\n");
+    this.post({ type: "answer", text: `Provider test results:\n${text}`, edits: [] });
+    this.postProviderStatus();
+  }
+
+  async refreshFreeModels() {
+    const config = this.getConfig();
+    this.post({ type: "status", text: "Refreshing free model candidates..." });
+    const result = await discoverFreeModelCandidates(config);
+    await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
+    await vscode.workspace.fs.writeFile(this.discoveryUri, Buffer.from(JSON.stringify(result, null, 2), "utf8"));
+    const text = `Found ${result.candidates.length} candidate model(s). Stored locally as ${DISCOVERY_FILE}. Candidates are not enabled until tested.`;
+    vscode.window.showInformationMessage(text);
+    this.post({ type: "answer", text, edits: [] });
   }
 
   async pickFilesForPrompt() {
@@ -371,6 +540,7 @@ class FreeAiViewProvider {
       .getConfiguration("freeAiConsole")
       .get("defaultProvider", "auto");
     const initialHistory = safeJsonForHtml(this.history);
+    const initialProviders = safeJsonForHtml(this.getProviderStatusLines());
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -458,6 +628,35 @@ class FreeAiViewProvider {
     .attached-files.visible {
       display: block;
     }
+    .route-panel {
+      margin: 0 0 10px 0;
+      padding: 8px;
+      border: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editor-background);
+      font-size: 12px;
+    }
+    .route-line {
+      margin-bottom: 6px;
+      opacity: 0.9;
+    }
+    .provider-list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      max-height: 90px;
+      overflow: auto;
+      opacity: 0.85;
+    }
+    .utility-actions {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .utility-actions button {
+      padding: 6px 8px;
+      font-size: 12px;
+    }
     .file-chip {
       display: flex;
       justify-content: space-between;
@@ -536,6 +735,15 @@ class FreeAiViewProvider {
       </select>
     </div>
   </div>
+  <div class="route-panel">
+    <div id="route-line" class="route-line">Mode: Ready</div>
+    <div id="provider-list" class="provider-list"></div>
+  </div>
+  <div class="utility-actions">
+    <button id="status-providers" title="Open provider status">Status</button>
+    <button id="test-providers" title="Test configured providers">Test</button>
+    <button id="refresh-models" title="Refresh free model candidates">Refresh</button>
+  </div>
   <textarea id="prompt" placeholder="Ask Free AI. Type your question here."></textarea>
   <div id="attached-files" class="attached-files"></div>
   <div class="prompt-actions">
@@ -553,7 +761,13 @@ class FreeAiViewProvider {
     const historyEl = document.getElementById("history");
     const addFileEl = document.getElementById("add-file");
     const attachedFilesEl = document.getElementById("attached-files");
+    const routeLineEl = document.getElementById("route-line");
+    const providerListEl = document.getElementById("provider-list");
+    const statusProvidersEl = document.getElementById("status-providers");
+    const testProvidersEl = document.getElementById("test-providers");
+    const refreshModelsEl = document.getElementById("refresh-models");
     let historyEntries = ${initialHistory};
+    let providerStatusEntries = ${initialProviders};
     let showingHistory = false;
     let attachedFiles = [];
     
@@ -562,6 +776,15 @@ class FreeAiViewProvider {
     }
     addFileEl.addEventListener("click", () => {
       vscode.postMessage({ type: "pickFiles" });
+    });
+    statusProvidersEl.addEventListener("click", () => {
+      vscode.postMessage({ type: "showProviderStatus" });
+    });
+    testProvidersEl.addEventListener("click", () => {
+      vscode.postMessage({ type: "testProviders" });
+    });
+    refreshModelsEl.addEventListener("click", () => {
+      vscode.postMessage({ type: "refreshModels" });
     });
     sendEl.addEventListener("click", send);
     promptEl.addEventListener("keydown", (event) => {
@@ -598,8 +821,13 @@ class FreeAiViewProvider {
         clearStatus();
         addMessage("status", message.text);
       }
+      if (message.type === "providerStatus") {
+        providerStatusEntries = message.providers || providerStatusEntries;
+        renderProviderStatus(message.route);
+      }
       
     });
+    renderProviderStatus();
     
 
     function send() {
@@ -672,6 +900,19 @@ class FreeAiViewProvider {
         row.appendChild(name);
         row.appendChild(remove);
         attachedFilesEl.appendChild(row);
+      });
+    }
+
+    function renderProviderStatus(route) {
+      if (route && routeLineEl) {
+        routeLineEl.textContent = "Mode: " + route.mode + " - " + route.reason + " -> " + (route.providers || []).join(", ");
+      }
+      if (!providerListEl) return;
+      providerListEl.textContent = "";
+      (providerStatusEntries || []).forEach((line) => {
+        const row = document.createElement("div");
+        row.textContent = line;
+        providerListEl.appendChild(row);
       });
     }
 
@@ -930,13 +1171,21 @@ async function applyGatewayModel(gatewayUrl, model) {
   }
 }
 
-async function askFreeProvider(gatewayUrl, authToken, provider, prompt) {
-  const selectedModel = PROVIDER_MODELS[provider] || PROVIDER_MODELS.cerebras;
+async function askFreeProvider(gatewayUrl, authToken, provider, prompt, localCoderModel, maxTokens = 1400) {
+  const selectedModel = provider.id === "ollama" ? (localCoderModel || provider.model) : provider.model;
   await applyGatewayModel(gatewayUrl, selectedModel);
-  return askGateway(gatewayUrl, authToken, prompt);
+  return askGateway(gatewayUrl, authToken, prompt, maxTokens);
 }
 
-async function askOpenCode(openCodeCommand, openCodeModel, authToken, prompt) {
+async function askOpenCode(options) {
+  const {
+    command,
+    model,
+    localModel,
+    authToken,
+    prompt,
+    fallbackToOllama
+  } = options || {};
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   if (!workspaceFolder) {
     throw new Error("OpenCode Agent needs an open workspace folder.");
@@ -944,6 +1193,7 @@ async function askOpenCode(openCodeCommand, openCodeModel, authToken, prompt) {
 
   const agentPrompt = [
     "You are being called from the user's Free AI VS Code panel.",
+    "Use a small context first. Read only files that are relevant to the user's request.",
     "Read project files when the request asks about files, code, or project review.",
     "If the user explicitly asks to fix/edit/change files, make the smallest useful edits and then summarize what changed.",
     "If the request is only a question or review, answer in chat without editing files.",
@@ -952,11 +1202,35 @@ async function askOpenCode(openCodeCommand, openCodeModel, authToken, prompt) {
     String(prompt || "")
   ].join("\n");
 
+  try {
+    return await runOpenCode({
+      command,
+      model: model || OPENCODE_MODEL,
+      authToken,
+      prompt: agentPrompt,
+      cwd: workspaceFolder.uri.fsPath
+    });
+  } catch (error) {
+    if (!fallbackToOllama || !isQuotaOrRateLimitError(getErrorMessage(error))) {
+      throw error;
+    }
+    return runOpenCode({
+      command,
+      model: normalizeOpenCodeOllamaModel(localModel || DEFAULT_LOCAL_CODER_MODEL),
+      authToken,
+      prompt: agentPrompt,
+      cwd: workspaceFolder.uri.fsPath
+    });
+  }
+}
+
+async function runOpenCode(options) {
+  const { command, model, authToken, prompt, cwd } = options;
   const { stdout, stderr } = await execFileAsync(
-    normalizeOpenCodeCommand(openCodeCommand),
-    ["run", agentPrompt, "-m", openCodeModel || OPENCODE_MODEL],
+    normalizeOpenCodeCommand(command),
+    ["run", String(prompt || ""), "-m", model || OPENCODE_MODEL],
     {
-      cwd: workspaceFolder.uri.fsPath,
+      cwd,
       env: {
         ...process.env,
         ANTHROPIC_API_KEY: authToken || "freecc"
@@ -969,13 +1243,11 @@ async function askOpenCode(openCodeCommand, openCodeModel, authToken, prompt) {
 
   const output = cleanTerminalText(stdout || "").trim();
   const errorOutput = cleanTerminalText(stderr || "").trim();
-  if (output) {
-    return output;
+  const text = output || errorOutput || "(OpenCode finished without text output)";
+  if (isQuotaOrRateLimitError(text)) {
+    throw new Error(text);
   }
-  if (errorOutput) {
-    return errorOutput;
-  }
-  return "(OpenCode finished without text output)";
+  return text;
 }
 
 function selectProviders(prompt, requestedProvider) {
@@ -993,11 +1265,121 @@ function selectProviders(prompt, requestedProvider) {
     return ["ollama", "cerebras"];
   }
 
-  return AUTO_PROVIDER_ORDER;
+  return providerCatalog.filter((provider) => provider.role === "chat").sort((a, b) => a.priority - b.priority).map((provider) => provider.id);
 }
 
 function shouldUseOpenCodeAgent(lowerPrompt) {
   return /(project|codebase|workspace|repo|repository|read files|check files|review project|fix|edit|change|modify|refactor|проект|кодбейс|репозитор|прочитай файл|прочитай файлы|проверь проект|проверь код|исправь|измени|отредактируй|рефактор)/i.test(lowerPrompt);
+}
+
+function selectRoute(options) {
+  const { prompt, requestedProvider, autoMode, catalog, providerState, hasReferencedFiles } = options;
+  const enabled = catalog.filter((provider) => provider.enabled);
+  const localProvider = enabled.find((provider) => provider.role === "local-fallback") || enabled.find((provider) => provider.id === "ollama");
+
+  if (requestedProvider && requestedProvider !== "auto") {
+    const manualProvider = enabled.find((provider) => provider.id === requestedProvider) || enabled[0];
+    return {
+      mode: manualProvider?.role === "agent" ? "Agent" : manualProvider?.role === "local-fallback" ? "Local" : "Manual",
+      reason: "Manual provider selection",
+      providers: manualProvider ? [manualProvider] : [],
+      compare: false
+    };
+  }
+
+  if (autoMode === "survival") {
+    return {
+      mode: "Local",
+      reason: "Survival mode uses local Ollama first",
+      providers: localProvider ? [localProvider] : firstReadyProviders(enabled, providerState, 1),
+      compare: false
+    };
+  }
+
+  const intent = classifyPrompt(prompt, hasReferencedFiles);
+  if (intent.agent) {
+    const agentProvider = enabled.find((provider) => provider.role === "agent");
+    return {
+      mode: "Agent",
+      reason: intent.reason,
+      providers: agentProvider ? [agentProvider] : localProvider ? [localProvider] : [],
+      compare: false
+    };
+  }
+
+  if (autoMode === "compare") {
+    const compareProviders = firstReadyProviders(enabled.filter((provider) => provider.role === "chat"), providerState, 4);
+    if (localProvider && compareProviders.length === 0) {
+      compareProviders.push(localProvider);
+    }
+    return {
+      mode: intent.fileReview ? "File Review" : "Cheap",
+      reason: intent.fileReview ? "Compare mode with file context" : "Compare mode",
+      providers: compareProviders,
+      compare: true
+    };
+  }
+
+  if (intent.local) {
+    return {
+      mode: "Local",
+      reason: intent.reason,
+      providers: localProvider ? [localProvider] : firstReadyProviders(enabled, providerState, 1),
+      compare: false
+    };
+  }
+
+  const primary = firstReadyProviders(enabled.filter((provider) => provider.role === "chat"), providerState, 1);
+  const providers = primary.length > 0 ? primary : [];
+  if (localProvider && !providers.some((provider) => provider.id === localProvider.id)) {
+    providers.push(localProvider);
+  }
+
+  return {
+    mode: intent.fileReview ? "File Review" : "Cheap",
+    reason: intent.fileReview ? "Named file context was auto-read" : "Balanced mode chooses one cheap provider plus local fallback",
+    providers,
+    compare: false
+  };
+}
+
+function classifyPrompt(prompt, hasReferencedFiles) {
+  const text = String(prompt || "").toLowerCase();
+  const projectWide = /(project|codebase|workspace|repo|repository|whole project|entire project|проект|кодбейс|репозитор|весь проект|всю папку|workspace)/i.test(text);
+  const editIntent = /(fix|edit|change|modify|refactor|apply|write|исправь|измени|отредактируй|рефактор|почини|добавь|удали|перепиши)/i.test(text);
+  const localIntent = /(offline|local|private|privacy|ollama|локально|офлайн|приват|без интернета|на ноуте)/i.test(text);
+
+  if (projectWide || editIntent) {
+    return {
+      agent: true,
+      local: false,
+      fileReview: false,
+      reason: projectWide ? "Project-wide request needs OpenCode Agent" : "Edit/change request needs OpenCode Agent"
+    };
+  }
+
+  if (localIntent) {
+    return {
+      agent: false,
+      local: true,
+      fileReview: false,
+      reason: "Local/private/offline request"
+    };
+  }
+
+  return {
+    agent: false,
+    local: false,
+    fileReview: Boolean(hasReferencedFiles),
+    reason: hasReferencedFiles ? "Named file context was auto-read" : "Simple chat request"
+  };
+}
+
+function firstReadyProviders(providers, providerState, count) {
+  return providers
+    .filter((provider) => !isProviderCoolingDown(provider.id, providerState))
+    .sort((a, b) => a.priority - b.priority)
+    .slice(0, count);
 }
 
 function formatProviderResults(results) {
@@ -1013,16 +1395,8 @@ function formatProviderResults(results) {
 }
 
 function formatProviderName(provider) {
-  const names = {
-    cerebras: "Cerebras",
-    gemini: "Gemini",
-    "gemini-fast": "Gemini Fast",
-    groq: "Groq",
-    openrouter: "OpenRouter",
-    ollama: "Ollama",
-    opencode: "OpenCode Agent"
-  };
-  return names[provider] || provider;
+  const found = providerCatalog.find((item) => item.id === provider);
+  return found?.label || provider;
 }
 
 function getDefaultOpenCodeCommand() {
@@ -1043,7 +1417,209 @@ function cleanTerminalText(value) {
     .trim();
 }
 
-async function askGateway(gatewayUrl, authToken, prompt) {
+function buildProviderCatalog(config) {
+  return providerCatalog.map((provider) => {
+    if (provider.id === "ollama") {
+      return {
+        ...provider,
+        model: config.localCoderModel || provider.model
+      };
+    }
+    if (provider.id === OPENCODE_PROVIDER) {
+      return {
+        ...provider,
+        model: config.openCodeModel || provider.model
+      };
+    }
+    return { ...provider };
+  }).sort((a, b) => a.priority - b.priority);
+}
+
+function normalizeProviderState(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const normalized = {};
+  for (const [key, state] of Object.entries(value)) {
+    if (!state || typeof state !== "object") {
+      continue;
+    }
+    normalized[key] = {
+      status: String(state.status || "Ready"),
+      lastError: String(state.lastError || ""),
+      cooldownUntil: Number(state.cooldownUntil || 0),
+      updatedAt: state.updatedAt || ""
+    };
+  }
+  return normalized;
+}
+
+function getProviderRuntimeState(provider, providerState) {
+  if (provider.role === "local-fallback") {
+    return {
+      status: "Local",
+      lastError: "",
+      cooldownUntil: 0
+    };
+  }
+  const state = providerState[provider.id] || {};
+  if (Number(state.cooldownUntil || 0) > Date.now()) {
+    return {
+      status: state.status || "Cooling down",
+      lastError: state.lastError || "",
+      cooldownUntil: Number(state.cooldownUntil || 0)
+    };
+  }
+  return {
+    status: state.status === "Rate limited" || state.status === "Cooling down" ? "Ready" : state.status || "Ready",
+    lastError: state.cooldownUntil ? "" : state.lastError || "",
+    cooldownUntil: 0
+  };
+}
+
+function isProviderCoolingDown(providerId, providerState) {
+  const state = providerState[providerId];
+  return Boolean(state && Number(state.cooldownUntil || 0) > Date.now());
+}
+
+function isQuotaOrRateLimitError(value) {
+  return /(429|rate limit|rate-limit|quota|too many requests|provider rate limit|402|insufficient|limit reached|try again later|retry-after)/i.test(String(value || ""));
+}
+
+function normalizeOpenCodeOllamaModel(model) {
+  const value = String(model || DEFAULT_LOCAL_CODER_MODEL).trim();
+  if (value.startsWith("ollama/")) {
+    return value;
+  }
+  if (value.startsWith("ollama:")) {
+    return `ollama/${value.slice("ollama:".length)}`;
+  }
+  return `ollama/${value}`;
+}
+
+async function discoverFreeModelCandidates(config) {
+  const result = {
+    refreshedAt: new Date().toISOString(),
+    candidates: [],
+    sources: []
+  };
+
+  await collectOpenRouterCandidates(result);
+  await collectOllamaCandidates(result);
+  await collectGatewayCandidates(result, config);
+  await collectStaticCandidateHints(result);
+
+  const seen = new Set();
+  result.candidates = result.candidates.filter((candidate) => {
+    const key = `${candidate.source}:${candidate.id}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+
+  return result;
+}
+
+async function collectOpenRouterCandidates(result) {
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/models");
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const json = await response.json();
+    const models = Array.isArray(json.data) ? json.data : [];
+    for (const model of models) {
+      if (model && typeof model.id === "string" && model.id.endsWith(":free")) {
+        result.candidates.push({
+          source: "openrouter",
+          id: model.id,
+          name: model.name || model.id,
+          status: "candidate",
+          enabled: false
+        });
+      }
+    }
+    result.sources.push({ source: "openrouter", status: "ok", count: models.length });
+  } catch (error) {
+    result.sources.push({ source: "openrouter", status: "failed", error: getErrorMessage(error) });
+  }
+}
+
+async function collectOllamaCandidates(result) {
+  try {
+    const response = await fetch("http://127.0.0.1:11434/api/tags");
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const json = await response.json();
+    const models = Array.isArray(json.models) ? json.models : [];
+    for (const model of models) {
+      if (model && typeof model.name === "string") {
+        result.candidates.push({
+          source: "ollama",
+          id: `ollama/${model.name}`,
+          name: model.name,
+          status: "candidate",
+          enabled: false
+        });
+      }
+    }
+    result.sources.push({ source: "ollama", status: "ok", count: models.length });
+  } catch (error) {
+    result.sources.push({ source: "ollama", status: "failed", error: getErrorMessage(error) });
+  }
+}
+
+async function collectGatewayCandidates(result, config) {
+  try {
+    const response = await fetch(`${config.gatewayUrl}/v1/models`, {
+      headers: {
+        Authorization: `Bearer ${config.authToken}`
+      }
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const json = await response.json();
+    const models = Array.isArray(json.data) ? json.data : [];
+    for (const model of models) {
+      const id = model.id || model.name || model.display_name;
+      if (id) {
+        result.candidates.push({
+          source: "gateway",
+          id: String(id),
+          name: model.display_name || model.name || String(id),
+          status: "candidate",
+          enabled: false
+        });
+      }
+    }
+    result.sources.push({ source: "gateway", status: "ok", count: models.length });
+  } catch (error) {
+    result.sources.push({ source: "gateway", status: "failed", error: getErrorMessage(error) });
+  }
+}
+
+async function collectStaticCandidateHints(result) {
+  const hints = [
+    { source: "github-models", id: "github/low-tier-models", name: "GitHub Models low-tier free API candidates" },
+    { source: "cloudflare-workers-ai", id: "@cf/qwen/qwen2.5-coder-32b-instruct", name: "Cloudflare Workers AI Qwen Coder candidate" },
+    { source: "cloudflare-workers-ai", id: "@cf/openai/gpt-oss-20b", name: "Cloudflare Workers AI GPT OSS 20B candidate" },
+    { source: "opencode-models", id: "models.dev", name: "OpenCode/models.dev provider directory candidates" }
+  ];
+  for (const hint of hints) {
+    result.candidates.push({
+      ...hint,
+      status: "manual-source",
+      enabled: false
+    });
+  }
+  result.sources.push({ source: "static-hints", status: "ok", count: hints.length });
+}
+
+async function askGateway(gatewayUrl, authToken, prompt, maxTokens = 1400) {
   const systemPrompt = `You are the user's separate Free AI assistant.
 
 Important rules:
@@ -1065,7 +1641,7 @@ Important rules:
     },
     body: JSON.stringify({
       model: "claude-3-5-sonnet-20241022",
-      max_tokens: 1400,
+      max_tokens: maxTokens,
       system: systemPrompt,
       messages: [{
         role: "user",
@@ -1186,5 +1762,12 @@ function deactivate() {}
 
 module.exports = {
   activate,
-  deactivate
+  deactivate,
+  _test: {
+    buildProviderCatalog,
+    classifyPrompt,
+    isQuotaOrRateLimitError,
+    normalizeProviderState,
+    selectRoute
+  }
 };
