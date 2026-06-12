@@ -72,6 +72,18 @@
     "enabled": true
   },
   {
+    "id": "gemma",
+    "label": "Gemma Local",
+    "model": "ollama/gemma3:4b",
+    "role": "local-fallback",
+    "costTier": "local-free",
+    "quotaType": "local-hardware",
+    "supportsTools": false,
+    "supportsOpenCode": true,
+    "priority": 85,
+    "enabled": true
+  },
+  {
     "id": "ollama",
     "label": "Ollama Local",
     "model": "ollama/qwen2.5-coder:3b",

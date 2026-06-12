@@ -48,7 +48,8 @@ assert.equal(route({ prompt: "README.md проверь", hasReferencedFiles: tru
 assert.notEqual(route({ prompt: "README.md проверь", hasReferencedFiles: true }).providers[0].id, "opencode");
 
 assert.equal(route({ prompt: "anything", autoMode: "survival" }).mode, "Local");
-assert.equal(route({ prompt: "anything", autoMode: "survival" }).providers[0].id, "ollama");
+assert.equal(route({ prompt: "anything", autoMode: "survival" }).providers[0].id, "gemma");
+assert.equal(route({ prompt: "answer with gemma" }).providers[0].id, "gemma");
 
 const cooled = {
   "gemini-fast": {

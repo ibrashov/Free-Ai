@@ -80,6 +80,7 @@
             "gemini-fast",
             "groq",
             "openrouter",
+            "gemma",
             "ollama"
           ],
           "description": "Default provider for Free AI Console."
