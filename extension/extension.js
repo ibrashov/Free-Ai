@@ -731,6 +731,7 @@ class FreeAiViewProvider {
         ${providerOption("gemini-fast", "Gemini Fast", defaultProvider)}
         ${providerOption("groq", "Groq", defaultProvider)}
         ${providerOption("openrouter", "OpenRouter", defaultProvider)}
+        ${providerOption("gemma", "Gemma Local", defaultProvider)}
         ${providerOption("ollama", "Ollama", defaultProvider)}
       </select>
     </div>
@@ -1173,8 +1174,66 @@ async function applyGatewayModel(gatewayUrl, model) {
 
 async function askFreeProvider(gatewayUrl, authToken, provider, prompt, localCoderModel, maxTokens = 1400) {
   const selectedModel = provider.id === "ollama" ? (localCoderModel || provider.model) : provider.model;
+  if (String(selectedModel || "").startsWith("ollama/")) {
+    if (provider.id === "gemma" || /\/gemma/i.test(String(selectedModel))) {
+      return askOllamaCli(selectedModel, prompt);
+    }
+    return askOllamaDirect(selectedModel, prompt, maxTokens);
+  }
   await applyGatewayModel(gatewayUrl, selectedModel);
   return askGateway(gatewayUrl, authToken, prompt, maxTokens);
+}
+
+async function askOllamaCli(model, prompt) {
+  const { stdout, stderr } = await execFileAsync(
+    "ollama",
+    ["run", normalizeOllamaApiModel(model), String(prompt || "")],
+    {
+      env: {
+        ...process.env,
+        OLLAMA_MODELS: process.env.OLLAMA_MODELS || "C:\\OllamaModels"
+      },
+      maxBuffer: 1024 * 1024 * 4,
+      timeout: 180000,
+      windowsHide: true
+    }
+  );
+
+  return cleanTerminalText(stdout || stderr || "").trim();
+}
+
+async function askOllamaDirect(model, prompt, maxTokens = 1400) {
+  const response = await fetch("http://127.0.0.1:11434/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: normalizeOllamaApiModel(model),
+      stream: false,
+      options: {
+        num_predict: maxTokens
+      },
+      messages: [
+        {
+          role: "system",
+          content: getFreeAiSystemPrompt()
+        },
+        {
+          role: "user",
+          content: String(prompt || "")
+        }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Ollama request failed: HTTP ${response.status}`);
+  }
+
+  const json = await response.json();
+  return String(json?.message?.content || json?.response || "").trim();
 }
 
 async function askOpenCode(options) {
@@ -1259,6 +1318,10 @@ function selectProviders(prompt, requestedProvider) {
 
   if (shouldUseOpenCodeAgent(lower)) {
     return [OPENCODE_PROVIDER];
+  }
+
+  if (/gemma/i.test(lower)) {
+    return ["gemma", "ollama", "cerebras"];
   }
 
   if (/(offline|local|private|privacy|ollama|локально|офлайн|приват)/i.test(lower)) {
@@ -1347,7 +1410,7 @@ function classifyPrompt(prompt, hasReferencedFiles) {
   const text = String(prompt || "").toLowerCase();
   const projectWide = /(project|codebase|workspace|repo|repository|whole project|entire project|проект|кодбейс|репозитор|весь проект|всю папку|workspace)/i.test(text);
   const editIntent = /(fix|edit|change|modify|refactor|apply|write|исправь|измени|отредактируй|рефактор|почини|добавь|удали|перепиши)/i.test(text);
-  const localIntent = /(offline|local|private|privacy|ollama|локально|офлайн|приват|без интернета|на ноуте)/i.test(text);
+  const localIntent = /(offline|local|private|privacy|ollama|gemma|локально|офлайн|приват|без интернета|на ноуте)/i.test(text);
 
   if (projectWide || editIntent) {
     return {
@@ -1412,8 +1475,14 @@ function normalizeOpenCodeCommand(command) {
 }
 
 function cleanTerminalText(value) {
-  return String(value || "")
+  const cleaned = String(value || "")
     .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/.\u0008/g, "")
+    .trim();
+  return cleaned
+    .split(/\r?\n/)
+    .filter((line) => !/^[\s\u2800-\u28ff]+$/.test(line))
+    .join("\n")
     .trim();
 }
 
@@ -1620,18 +1689,7 @@ async function collectStaticCandidateHints(result) {
 }
 
 async function askGateway(gatewayUrl, authToken, prompt, maxTokens = 1400) {
-  const systemPrompt = `You are the user's separate Free AI assistant.
-
-Important rules:
-- Do not call tools.
-- You cannot directly edit files yourself.
-- Do not output fake Write/Edit/Read JSON.
-- If the user asks for code, write code in the chat.
-- If the user asks for architecture, answer in Markdown.
-- If the user asks to edit an attached file, return the complete replacement content using exactly this XML-like block:
-<free_ai_file_edits><file path="exact attached file path">complete new file content</file></free_ai_file_edits>
-- Only use paths that appear in the attached file list.
-- Do not claim the edit was applied. The VS Code extension will ask the user to confirm before writing.`;
+  const systemPrompt = getFreeAiSystemPrompt();
 
   const response = await fetch(`${gatewayUrl}/v1/messages`, {
     method: "POST",
@@ -1657,6 +1715,27 @@ Important rules:
 
   const raw = await response.text();
   return parseSseText(raw);
+}
+
+function getFreeAiSystemPrompt() {
+  return `You are the user's separate Free AI assistant.
+
+Important rules:
+- Answer in the same language as the user's request unless the user asks otherwise.
+- Do not call tools.
+- You cannot directly edit files yourself.
+- Do not output fake Write/Edit/Read JSON.
+- If the user asks for code, write code in the chat.
+- If the user asks for architecture, answer in Markdown.
+- If the user asks to edit an attached file, return the complete replacement content using exactly this XML-like block:
+<free_ai_file_edits><file path="exact attached file path">complete new file content</file></free_ai_file_edits>
+- Only use paths that appear in the attached file list.
+- Do not claim the edit was applied. The VS Code extension will ask the user to confirm before writing.`;
+}
+
+function normalizeOllamaApiModel(model) {
+  const value = String(model || "").trim();
+  return value.startsWith("ollama/") ? value.slice("ollama/".length) : value;
 }
 
 function parseSseText(raw) {

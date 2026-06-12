@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("openrouter", "gemini", "gemini-fast", "groq", "cerebras", "ollama", "custom")]
+    [ValidateSet("openrouter", "gemini", "gemini-fast", "groq", "cerebras", "ollama", "gemma", "custom")]
     [string]$Provider = "openrouter",
 
     [string]$Model = "",
@@ -18,6 +18,7 @@ $modelMap = @{
     "groq"        = "groq/qwen/qwen3-32b"
     "cerebras"    = "cerebras/gpt-oss-120b"
     "ollama"      = "ollama/qwen2.5-coder:3b"
+    "gemma"       = "ollama/gemma3:4b"
 }
 
 if ($Provider -eq "custom") {

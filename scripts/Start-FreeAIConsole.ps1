@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("auto", "cerebras", "gemini", "gemini-fast", "groq", "openrouter", "ollama")]
+    [ValidateSet("auto", "cerebras", "gemini", "gemini-fast", "groq", "openrouter", "ollama", "gemma")]
     [string]$Provider = "auto",
 
     [int]$MaxTokens = 1200
@@ -12,7 +12,7 @@ $askScript = Join-Path $PSScriptRoot "Ask-FreeAI.ps1"
 Write-Host "Free AI Console"
 Write-Host "Provider: $Provider"
 Write-Host "Type /exit to close."
-Write-Host "Type /provider auto|cerebras|gemini|gemini-fast|groq|openrouter|ollama to switch."
+Write-Host "Type /provider auto|cerebras|gemini|gemini-fast|groq|openrouter|ollama|gemma to switch."
 Write-Host ""
 
 while ($true) {
@@ -28,7 +28,7 @@ while ($true) {
 
     if ($inputText.StartsWith("/provider ")) {
         $nextProvider = $inputText.Substring("/provider ".Length).Trim()
-        if ($nextProvider -in @("auto", "cerebras", "gemini", "gemini-fast", "groq", "openrouter", "ollama")) {
+        if ($nextProvider -in @("auto", "cerebras", "gemini", "gemini-fast", "groq", "openrouter", "ollama", "gemma")) {
             $Provider = $nextProvider
             Write-Host "Provider changed to: $Provider"
         } else {

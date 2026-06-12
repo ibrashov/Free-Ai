@@ -24,6 +24,7 @@ Local fallback:
 
 ```text
 Ollama
+Gemma Local
 ```
 
 ## Recommended Order
@@ -35,8 +36,9 @@ Use this order for the current setup:
 2. Cerebras    - strong fallback for normal chat
 3. Groq        - fast fallback, but token-per-minute limits can hit quickly
 4. OpenRouter  - useful free-model fallback, but daily free requests are limited
-5. Ollama      - local survival fallback, no API quota
-6. OpenCode    - project/file agent mode, with Ollama fallback when cloud is rate-limited
+5. Gemma Local - compact local model through Ollama, no API quota
+6. Ollama      - local coder fallback, no API quota
+7. OpenCode    - project/file agent mode, with Ollama fallback when cloud is rate-limited
 ```
 
 ## Switch Active Gateway Model
@@ -55,6 +57,7 @@ Other options:
 .\\scripts\\Set-GatewayModel.ps1 -Provider cerebras
 .\\scripts\\Set-GatewayModel.ps1 -Provider openrouter
 .\\scripts\\Set-GatewayModel.ps1 -Provider ollama
+.\\scripts\\Set-GatewayModel.ps1 -Provider gemma
 ```
 
 Custom model:

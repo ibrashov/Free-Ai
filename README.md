@@ -187,6 +187,7 @@ Inside the console:
 /provider gemini
 /provider groq
 /provider openrouter
+/provider gemma
 /provider ollama
 /exit
 ```
@@ -199,8 +200,9 @@ Auto mode is local-first and quota-aware:
 balanced simple requests -> one cheap cloud provider, then Ollama fallback
 compare mode -> several cloud providers
 project / file editing / codebase review requests -> OpenCode Agent
+gemma -> Gemma Local
 offline / local / private / ollama -> Ollama
-survival mode -> Ollama only
+survival mode -> Gemma Local first
 ```
 
 If a provider returns quota/rate-limit errors, Free AI Console puts it in cooldown and avoids it temporarily. The gateway has one active model at a time, so compare mode runs providers sequentially.
