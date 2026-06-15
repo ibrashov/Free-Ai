@@ -129,10 +129,12 @@ class FreeAiViewProvider {
     return this.chats.find((chat) => chat.id === this.activeChatId) || null;
   }
 
-  ensureChat(chatId) {
+  ensureChat(chatId, activate = true) {
     const requested = this.chats.find((chat) => chat.id === chatId);
     if (requested) {
-      this.activeChatId = requested.id;
+      if (activate) {
+        this.activeChatId = requested.id;
+      }
       return requested;
     }
 
@@ -165,19 +167,21 @@ class FreeAiViewProvider {
     this.postChatState();
   }
 
-  addToHistory(role, text, chatId = this.activeChatId) {
-    const chat = this.ensureChat(chatId);
+  addToHistory(role, text, chatId = this.activeChatId, activate = true) {
+    const chat = this.ensureChat(chatId, activate);
     const timestamp = new Date().toISOString();
     chat.messages.push({
       role: String(role),
       text: String(text || ""),
       timestamp
     });
-    if (role === "user" && !chat.messages.some((message, index) => index < chat.messages.length - 1 && message.role === "user")) {
+    if (role === "user" && chat.messages.filter((message) => message.role === "user").length === 1) {
       chat.title = createChatTitle(text);
     }
     chat.updatedAt = timestamp;
-    this.activeChatId = chat.id;
+    if (activate) {
+      this.activeChatId = chat.id;
+    }
     this.queueSaveChats();
     return chat;
   }
@@ -197,13 +201,6 @@ class FreeAiViewProvider {
       type: "chatState",
       state: this.getChatState()
     });
-  }
-
-  async clearLegacyHistoryState() {
-    const legacyHistory = normalizeHistory(this.context.globalState.get("freeAi.history", []));
-    if (legacyHistory.length > 0) {
-      await this.context.globalState.update("freeAi.history", undefined);
-    }
   }
 
   resolveWebviewView(webviewView) {
@@ -346,7 +343,7 @@ class FreeAiViewProvider {
       const edits = this.extractFirstAllowedEdits(successful, editSourceFiles);
       const visibleAnswer = formatProviderResults(results);
       
-      this.addToHistory("assistant", visibleAnswer, chat.id);
+      this.addToHistory("assistant", visibleAnswer, chat.id, false);
       
       this.post({
         type: "answer",
@@ -358,7 +355,7 @@ class FreeAiViewProvider {
       this.postProviderStatus();
     } catch (error) {
       const errorMsg = getErrorMessage(error);
-      this.addToHistory("error", errorMsg, chat.id);
+      this.addToHistory("error", errorMsg, chat.id, false);
       this.post({
         type: "error",
         text: errorMsg,
@@ -689,7 +686,7 @@ class FreeAiViewProvider {
     const defaultProvider = vscode.workspace
       .getConfiguration("freeAiConsole")
       .get("defaultProvider", "auto");
-    const initialHistory = safeJsonForHtml(this.history);
+    const initialChatState = safeJsonForHtml(this.getChatState());
     const initialProviders = safeJsonForHtml(this.getProviderStatusLines());
 
     return `<!DOCTYPE html>
@@ -715,6 +712,68 @@ class FreeAiViewProvider {
       gap: 8px;
       margin-bottom: 10px;
       flex-wrap: wrap;
+    }
+    .chat-header {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .chat-title {
+      overflow: hidden;
+      font-weight: 600;
+      text-align: center;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .chat-header button {
+      padding: 6px 9px;
+      font-size: 12px;
+    }
+    .chat-panel {
+      display: none;
+      margin-bottom: 10px;
+      padding: 8px;
+      border: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editor-background);
+    }
+    .chat-panel.visible {
+      display: block;
+    }
+    .chat-list {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+    .chat-item {
+      width: 100%;
+      padding: 8px;
+      color: var(--vscode-foreground);
+      background: transparent;
+      border: 1px solid transparent;
+      text-align: left;
+      white-space: normal;
+    }
+    .chat-item:hover,
+    .chat-item.active {
+      background: var(--vscode-list-hoverBackground);
+      border-color: var(--vscode-panel-border);
+    }
+    .chat-item-title {
+      display: block;
+      overflow: hidden;
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .chat-item-meta {
+      display: block;
+      margin-top: 3px;
+      font-size: 11px;
+      opacity: 0.7;
     }
     .toolbar-left {
       flex: 1;
@@ -829,6 +888,7 @@ class FreeAiViewProvider {
       display: flex;
       flex-direction: column;
       gap: 10px;
+      padding-bottom: 8px;
     }
     .msg {
       white-space: pre-wrap;
@@ -871,6 +931,14 @@ class FreeAiViewProvider {
   </style>
 </head>
 <body>
+  <div class="chat-header">
+    <button id="toggle-chats" title="Open chat history">Chats</button>
+    <div id="active-chat-title" class="chat-title">New chat</div>
+    <button id="new-chat" title="Start a new chat">New chat</button>
+  </div>
+  <div id="chat-panel" class="chat-panel">
+    <div id="chat-list" class="chat-list"></div>
+  </div>
   <div class="toolbar">
     <div class="toolbar-left">
       <select id="provider" aria-label="Provider">
@@ -909,22 +977,30 @@ class FreeAiViewProvider {
     const providerEl = document.getElementById("provider");
     const messagesEl = document.getElementById("messages");
     const sendEl = document.getElementById("send");
-    const historyEl = document.getElementById("history");
     const addFileEl = document.getElementById("add-file");
     const attachedFilesEl = document.getElementById("attached-files");
+    const toggleChatsEl = document.getElementById("toggle-chats");
+    const newChatEl = document.getElementById("new-chat");
+    const chatPanelEl = document.getElementById("chat-panel");
+    const chatListEl = document.getElementById("chat-list");
+    const activeChatTitleEl = document.getElementById("active-chat-title");
     const routeLineEl = document.getElementById("route-line");
     const providerListEl = document.getElementById("provider-list");
     const statusProvidersEl = document.getElementById("status-providers");
     const testProvidersEl = document.getElementById("test-providers");
     const refreshModelsEl = document.getElementById("refresh-models");
-    let historyEntries = ${initialHistory};
+    let chatState = ${initialChatState};
+    let activeChatId = chatState.activeChatId || "";
     let providerStatusEntries = ${initialProviders};
-    let showingHistory = false;
     let attachedFiles = [];
     
-    if (historyEl) {
-      historyEl.addEventListener("click", toggleHistory);
-    }
+    toggleChatsEl.addEventListener("click", () => {
+      chatPanelEl.classList.toggle("visible");
+    });
+    newChatEl.addEventListener("click", () => {
+      chatPanelEl.classList.remove("visible");
+      vscode.postMessage({ type: "newChat" });
+    });
     addFileEl.addEventListener("click", () => {
       vscode.postMessage({ type: "pickFiles" });
     });
@@ -951,18 +1027,29 @@ class FreeAiViewProvider {
       }
       if (message.type === "answer") {
         clearStatus();
-        const item = addMessage("ai", message.text);
-        if (message.edits && message.edits.length) {
-          attachEditActions(item, message.edits);
+        if (message.chatState) {
+          updateChatState(message.chatState, false);
         }
-        remember("assistant", message.text);
+        if (!message.chatId || message.chatId === activeChatId) {
+          const item = addMessage("ai", message.text);
+          if (message.edits && message.edits.length) {
+            attachEditActions(item, message.edits);
+          }
+        }
         sendEl.disabled = false;
       }
       if (message.type === "error") {
         clearStatus();
-        addMessage("error", message.text);
-        remember("error", message.text);
+        if (message.chatState) {
+          updateChatState(message.chatState, false);
+        }
+        if (!message.chatId || message.chatId === activeChatId) {
+          addMessage("error", message.text);
+        }
         sendEl.disabled = false;
+      }
+      if (message.type === "chatState") {
+        updateChatState(message.state, true);
       }
       if (message.type === "filesPicked") {
         attachedFiles = attachedFiles.concat(message.files || []);
@@ -978,6 +1065,7 @@ class FreeAiViewProvider {
       }
       
     });
+    updateChatState(chatState, true);
     renderProviderStatus();
     
 
@@ -988,7 +1076,7 @@ class FreeAiViewProvider {
       const displayPrompt = buildDisplayPrompt(basePrompt);
 
       addMessage("user", displayPrompt);
-      remember("user", displayPrompt);
+      rememberLocalMessage("user", displayPrompt);
 
       setStatus("Thinking...");
       sendEl.disabled = true;
@@ -997,7 +1085,8 @@ class FreeAiViewProvider {
         prompt,
         displayPrompt,
         attachedFiles: attachedFiles.map(file => ({ name: file.name, path: file.path })),
-        provider: providerEl.value
+        provider: providerEl.value,
+        chatId: activeChatId
       });
       promptEl.value = "";
       attachedFiles = [];
@@ -1067,42 +1156,93 @@ class FreeAiViewProvider {
       });
     }
 
-    function remember(role, text) {
-      historyEntries.push({
+    function getActiveChat() {
+      return (chatState.chats || []).find((chat) => chat.id === activeChatId) || null;
+    }
+
+    function rememberLocalMessage(role, text) {
+      const chat = getActiveChat();
+      if (!chat) return;
+      const timestamp = new Date().toISOString();
+      chat.messages = chat.messages || [];
+      chat.messages.push({
         role,
         text,
-        timestamp: new Date().toISOString()
+        timestamp
+      });
+      chat.updatedAt = timestamp;
+      if (role === "user" && chat.messages.filter((message) => message.role === "user").length === 1) {
+        chat.title = makeLocalChatTitle(text);
+        activeChatTitleEl.textContent = chat.title;
+      }
+      renderChatList();
+    }
+
+    function updateChatState(nextState, renderMessages) {
+      if (!nextState || !Array.isArray(nextState.chats)) return;
+      chatState = nextState;
+      activeChatId = nextState.activeChatId || "";
+      renderChatList();
+      const chat = getActiveChat();
+      activeChatTitleEl.textContent = chat ? chat.title : "New chat";
+      if (renderMessages) {
+        renderActiveChat();
+      }
+    }
+
+    function renderChatList() {
+      chatListEl.textContent = "";
+      (chatState.chats || []).forEach((chat) => {
+        const item = document.createElement("button");
+        item.className = "chat-item" + (chat.id === activeChatId ? " active" : "");
+        item.type = "button";
+
+        const title = document.createElement("span");
+        title.className = "chat-item-title";
+        title.textContent = chat.title || "New chat";
+
+        const meta = document.createElement("span");
+        meta.className = "chat-item-meta";
+        const count = Array.isArray(chat.messages) ? chat.messages.length : 0;
+        const date = chat.updatedAt ? new Date(chat.updatedAt).toLocaleString() : "";
+        meta.textContent = count + " messages" + (date ? " - " + date : "");
+
+        item.appendChild(title);
+        item.appendChild(meta);
+        item.addEventListener("click", () => {
+          chatPanelEl.classList.remove("visible");
+          vscode.postMessage({ type: "selectChat", chatId: chat.id });
+        });
+        chatListEl.appendChild(item);
       });
     }
 
-    function toggleHistory() {
-      if (!historyEl) return;
-      showingHistory = !showingHistory;
-      historyEl.textContent = showingHistory ? "Chat" : "History";
+    function renderActiveChat() {
       messagesEl.textContent = "";
-
-      if (!showingHistory) {
-        return;
-      }
-
-      const entries = historyEntries.slice(-80).reverse();
+      const chat = getActiveChat();
+      const entries = chat && Array.isArray(chat.messages) ? chat.messages : [];
       if (entries.length === 0) {
-        addMessage("status empty-history", "No saved history yet.");
+        addMessage("status empty-history", "Start a new conversation.");
         return;
       }
 
       entries.forEach((entry) => {
-        const stamp = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : "";
-        const label = entry.role === "user" ? "You" : entry.role === "assistant" ? "Free AI" : "Error";
-        addMessage(entry.role === "assistant" ? "ai" : entry.role, stamp ? label + " - " + stamp + "\\n" + entry.text : label + "\\n" + entry.text);
+        addMessage(entry.role === "assistant" ? "ai" : entry.role, entry.text);
       });
+    }
+
+    function makeLocalChatTitle(text) {
+      const firstLine = String(text || "").split(/\\r?\\n/).find((line) => line.trim()) || "New chat";
+      const compact = firstLine.replace(/\\s+/g, " ").trim();
+      return compact.length > 48 ? compact.slice(0, 45) + "..." : compact;
     }
 
     function addMessage(kind, text) {
       const item = document.createElement("div");
       item.className = "msg " + kind;
       item.textContent = text;
-      messagesEl.prepend(item);
+      messagesEl.appendChild(item);
+      item.scrollIntoView({ block: "end" });
       return item;
     }
 
@@ -1135,7 +1275,8 @@ class FreeAiViewProvider {
       item.className = "msg status";
       item.id = "status";
       item.textContent = text;
-      messagesEl.prepend(item);
+      messagesEl.appendChild(item);
+      item.scrollIntoView({ block: "end" });
     }
 
     function clearStatus() {
