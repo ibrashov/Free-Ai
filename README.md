@@ -21,7 +21,7 @@ http://127.0.0.1:8082
 - Lets you choose provider: Auto, OpenCode Agent, Cerebras, Gemini, Groq, OpenRouter, Ollama.
 - Uses quota-aware routing with cooldowns and local Ollama fallback.
 - Opens local Odysseus Chat from VS Code with the **Odysseus** button or command.
-- Saves local request history and lets you view it from the panel.
+- Saves separate local chat sessions and lets you reopen and continue them.
 - Uses `free-claude-code` as a local proxy.
 - Keeps free AI chat separate from official Claude Code.
 - Includes PowerShell scripts for testing providers and switching models.
@@ -286,10 +286,14 @@ local logs
 
 ## Request History
 
-- All requests and responses are automatically saved locally in VS Code
-- History persists between sessions
-- History is stored in a local `history.json` database in the extension storage folder
-- Click **History** in the Free AI panel to view recent saved messages
+- Every conversation is saved as a separate chat.
+- Use **Chats** to reopen an earlier conversation and **New chat** to start a clean one.
+- The first request becomes the chat title automatically.
+- Reopened chats include recent messages as model context, so follow-up requests remember the conversation.
+- Chats persist between VS Code sessions in `chats.json` inside the extension storage folder.
+- Existing flat `history.json` data is migrated into an **Imported chat history** conversation.
+
+Chat context is intentionally bounded to recent messages so a long conversation does not grow every request without limit. This is conversation memory only; long-term Odysseus-style memory is a separate future layer.
 
 Package & install a VSIX
 

@@ -882,7 +882,6 @@ class FreeAiViewProvider {
       color: var(--vscode-errorForeground);
       border: 1px solid var(--vscode-panel-border);
     }
-    #history,
     .messages {
       margin-top: 12px;
       display: flex;
@@ -1238,6 +1237,10 @@ class FreeAiViewProvider {
     }
 
     function addMessage(kind, text) {
+      if (kind === "user" || kind === "ai" || kind === "error") {
+        const empty = messagesEl.querySelector(".empty-history");
+        if (empty) empty.remove();
+      }
       const item = document.createElement("div");
       item.className = "msg " + kind;
       item.textContent = text;
@@ -1414,6 +1417,72 @@ function normalizeHistory(value) {
     }));
 }
 
+function createChatId() {
+  return `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createChatTitle(text) {
+  const firstLine = String(text || "")
+    .split(/\r?\n/)
+    .find((line) => line.trim()) || "New chat";
+  const compact = firstLine.replace(/\s+/g, " ").trim();
+  return compact.length > 48 ? `${compact.slice(0, 45)}...` : compact;
+}
+
+function createChatRecord(title = "New chat", messages = []) {
+  const normalizedMessages = normalizeHistory(messages);
+  const now = new Date().toISOString();
+  return {
+    id: createChatId(),
+    title: String(title || "New chat"),
+    createdAt: normalizedMessages[0]?.timestamp || now,
+    updatedAt: normalizedMessages[normalizedMessages.length - 1]?.timestamp || now,
+    messages: normalizedMessages
+  };
+}
+
+function normalizeChatStore(value) {
+  const source = value && Array.isArray(value.chats) ? value.chats : [];
+  const seen = new Set();
+  const chats = [];
+
+  for (const item of source) {
+    if (!item || !Array.isArray(item.messages)) {
+      continue;
+    }
+    let id = String(item.id || createChatId());
+    if (seen.has(id)) {
+      id = createChatId();
+    }
+    seen.add(id);
+
+    const messages = normalizeHistory(item.messages);
+    const createdAt = item.createdAt || messages[0]?.timestamp || new Date().toISOString();
+    const updatedAt = item.updatedAt || messages[messages.length - 1]?.timestamp || createdAt;
+    chats.push({
+      id,
+      title: String(item.title || createChatTitle(messages.find((message) => message.role === "user")?.text)),
+      createdAt,
+      updatedAt,
+      messages
+    });
+  }
+
+  if (chats.length === 0) {
+    chats.push(createChatRecord());
+  }
+
+  const requestedActiveId = String(value?.activeChatId || "");
+  const activeChatId = chats.some((chat) => chat.id === requestedActiveId)
+    ? requestedActiveId
+    : chats[0].id;
+
+  return {
+    activeChatId,
+    chats
+  };
+}
+
 function mergeHistory(primary, secondary) {
   const seen = new Set();
   const merged = [];
@@ -1428,6 +1497,47 @@ function mergeHistory(primary, secondary) {
   }
 
   return merged.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+}
+
+function appendConversationContext(currentPrompt, messages) {
+  const candidates = normalizeHistory(messages)
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .slice(-CHAT_CONTEXT_MESSAGE_LIMIT);
+  if (candidates.length === 0) {
+    return String(currentPrompt || "");
+  }
+
+  const selected = [];
+  let usedChars = 0;
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const message = candidates[index];
+    const remaining = CHAT_CONTEXT_CHAR_LIMIT - usedChars;
+    if (remaining <= 0) {
+      break;
+    }
+    const text = String(message.text || "");
+    const clipped = text.length > remaining ? text.slice(text.length - remaining) : text;
+    selected.unshift({
+      role: message.role,
+      text: clipped
+    });
+    usedChars += clipped.length;
+  }
+
+  const transcript = selected
+    .map((message) => `${message.role === "user" ? "User" : "Assistant"}:\n${message.text}`)
+    .join("\n\n");
+
+  return [
+    "Continue the saved conversation below. Use it as context and do not claim that you forgot earlier messages.",
+    "",
+    "--- SAVED CHAT CONTEXT ---",
+    transcript,
+    "--- END SAVED CHAT CONTEXT ---",
+    "",
+    "Current user request:",
+    String(currentPrompt || "")
+  ].join("\n");
 }
 
 function safeJsonForHtml(value) {
@@ -2179,11 +2289,16 @@ module.exports = {
   activate,
   deactivate,
   _test: {
+    FreeAiViewProvider,
+    appendConversationContext,
     buildProviderCatalog,
     classifyPrompt,
+    createChatRecord,
+    createChatTitle,
     fetchWithTimeout,
     isQuotaOrRateLimitError,
     normalizeOllamaApiModel,
+    normalizeChatStore,
     normalizeProviderState,
     selectRoute
   }

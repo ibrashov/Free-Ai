@@ -1,5 +1,6 @@
 const assert = require("assert");
 const Module = require("module");
+const vm = require("vm");
 
 const originalLoad = Module._load;
 Module._load = function patchedLoad(request, parent, isMain) {
@@ -13,7 +14,8 @@ Module._load = function patchedLoad(request, parent, isMain) {
       },
       Uri: {
         joinPath: () => ({})
-      }
+      },
+      window: {}
     };
   }
   return originalLoad(request, parent, isMain);
@@ -63,5 +65,39 @@ assert.equal(route({ prompt: "Explain maps", providerState: cooled }).providers[
 assert.equal(_test.isQuotaOrRateLimitError("Provider rate limit reached"), true);
 assert.equal(_test.normalizeOllamaApiModel("ollama/gemma3:4b"), "gemma3:4b");
 assert.equal(_test.normalizeOllamaApiModel("qwen2.5-coder:3b"), "qwen2.5-coder:3b");
+
+const firstChat = _test.createChatRecord("New chat", [
+  { role: "user", text: "My name is Anuar", timestamp: "2026-06-15T10:00:00.000Z" },
+  { role: "assistant", text: "Nice to meet you", timestamp: "2026-06-15T10:00:01.000Z" },
+  { role: "error", text: "temporary failure", timestamp: "2026-06-15T10:00:02.000Z" }
+]);
+const secondChat = _test.createChatRecord("Separate topic", []);
+const chatStore = _test.normalizeChatStore({
+  activeChatId: secondChat.id,
+  chats: [firstChat, secondChat]
+});
+assert.equal(chatStore.activeChatId, secondChat.id);
+assert.equal(chatStore.chats.length, 2);
+assert.equal(_test.createChatTitle("A very useful first question\nwith details"), "A very useful first question");
+
+const conversationPrompt = _test.appendConversationContext("What is my name?", firstChat.messages);
+assert.match(conversationPrompt, /My name is Anuar/);
+assert.match(conversationPrompt, /Nice to meet you/);
+assert.doesNotMatch(conversationPrompt, /temporary failure/);
+assert.match(conversationPrompt, /Current user request:\nWhat is my name\?/);
+
+const viewProvider = new _test.FreeAiViewProvider({}, {
+  globalStorageUri: {},
+  globalState: {
+    get: (_key, fallback) => fallback,
+    update: async () => {}
+  }
+});
+viewProvider.chats = [firstChat];
+viewProvider.activeChatId = firstChat.id;
+const html = viewProvider.getHtml({});
+const scriptMatch = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/);
+assert.ok(scriptMatch, "webview script should be present");
+new vm.Script(scriptMatch[1]);
 
 console.log("router tests ok");
