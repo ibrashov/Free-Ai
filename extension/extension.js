@@ -15,6 +15,9 @@ const DISCOVERY_TIMEOUT_MS = 15000;
 const PROVIDER_TEST_TIMEOUT_MS = 60000;
 const PROVIDER_STATE_KEY = "freeAi.providerState";
 const DISCOVERY_FILE = "provider-candidates.json";
+const CHATS_FILE = "chats.json";
+const CHAT_CONTEXT_MESSAGE_LIMIT = 16;
+const CHAT_CONTEXT_CHAR_LIMIT = 24000;
 
 function activate(context) {
   const provider = new FreeAiViewProvider(context.extensionUri, context);
@@ -46,57 +49,161 @@ class FreeAiViewProvider {
     this.extensionUri = extensionUri;
     this.context = context;
     this.view = undefined;
-    this.historyUri = vscode.Uri.joinPath(this.context.globalStorageUri, "history.json");
-    this.history = [];
-    this.historySave = Promise.resolve();
+    this.chatsUri = vscode.Uri.joinPath(this.context.globalStorageUri, CHATS_FILE);
+    this.legacyHistoryUri = vscode.Uri.joinPath(this.context.globalStorageUri, "history.json");
+    this.chats = [];
+    this.activeChatId = "";
+    this.chatSave = Promise.resolve();
     this.pendingEdits = new Map();
     this.providerState = normalizeProviderState(this.context.globalState.get(PROVIDER_STATE_KEY, {}));
     this.discoveryUri = vscode.Uri.joinPath(this.context.globalStorageUri, DISCOVERY_FILE);
   }
 
-  async loadHistory() {
-    const fileHistory = await this.readHistoryFile();
-    const legacyHistory = normalizeHistory(this.context.globalState.get("freeAi.history", []));
-    this.history = mergeHistory(fileHistory, legacyHistory);
+  async loadChats() {
+    const stored = await this.readChatsFile();
+    if (stored) {
+      const normalized = normalizeChatStore(stored);
+      this.chats = normalized.chats;
+      this.activeChatId = normalized.activeChatId;
+    } else {
+      const fileHistory = await this.readLegacyHistoryFile();
+      const globalHistory = normalizeHistory(this.context.globalState.get("freeAi.history", []));
+      const legacyHistory = mergeHistory(fileHistory, globalHistory);
+      const migrated = legacyHistory.length > 0
+        ? createChatRecord("Imported chat history", legacyHistory)
+        : createChatRecord();
+      this.chats = [migrated];
+      this.activeChatId = migrated.id;
+      await this.saveChats();
+      if (globalHistory.length > 0) {
+        await this.context.globalState.update("freeAi.history", undefined);
+      }
+    }
 
-    if (this.history.length > fileHistory.length || legacyHistory.length > 0) {
-      await this.saveHistory();
-      await this.context.globalState.update("freeAi.history", undefined);
+    if (!this.getActiveChat()) {
+      const chat = createChatRecord();
+      this.chats.unshift(chat);
+      this.activeChatId = chat.id;
+      await this.saveChats();
     }
   }
 
-  async readHistoryFile() {
+  async readChatsFile() {
     try {
-      const bytes = await vscode.workspace.fs.readFile(this.historyUri);
+      const bytes = await vscode.workspace.fs.readFile(this.chatsUri);
+      return JSON.parse(Buffer.from(bytes).toString("utf8"));
+    } catch {
+      return null;
+    }
+  }
+
+  async readLegacyHistoryFile() {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(this.legacyHistoryUri);
       const raw = Buffer.from(bytes).toString("utf8");
-      const parsed = JSON.parse(raw);
-      return normalizeHistory(parsed);
+      return normalizeHistory(JSON.parse(raw));
     } catch {
       return [];
     }
   }
 
-  async saveHistory() {
+  async saveChats() {
     await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
-    const json = JSON.stringify(this.history, null, 2);
-    await vscode.workspace.fs.writeFile(this.historyUri, Buffer.from(json, "utf8"));
+    const json = JSON.stringify({
+      version: 1,
+      activeChatId: this.activeChatId,
+      chats: this.chats
+    }, null, 2);
+    await vscode.workspace.fs.writeFile(this.chatsUri, Buffer.from(json, "utf8"));
   }
 
-  addToHistory(role, text) {
-    this.history.push({
-      role: role,
-      text: text,
-      timestamp: new Date().toISOString()
-    });
-    this.queueSaveHistory();
-  }
-
-  queueSaveHistory() {
-    this.historySave = this.historySave
-      .then(() => this.saveHistory())
+  queueSaveChats() {
+    this.chatSave = this.chatSave
+      .then(() => this.saveChats())
       .catch((error) => {
-        console.error("Failed to save Free AI history", error);
+        console.error("Failed to save Free AI chats", error);
       });
+  }
+
+  getActiveChat() {
+    return this.chats.find((chat) => chat.id === this.activeChatId) || null;
+  }
+
+  ensureChat(chatId) {
+    const requested = this.chats.find((chat) => chat.id === chatId);
+    if (requested) {
+      this.activeChatId = requested.id;
+      return requested;
+    }
+
+    const active = this.getActiveChat();
+    if (active) {
+      return active;
+    }
+
+    const chat = createChatRecord();
+    this.chats.unshift(chat);
+    this.activeChatId = chat.id;
+    return chat;
+  }
+
+  createNewChat() {
+    const chat = createChatRecord();
+    this.chats.unshift(chat);
+    this.activeChatId = chat.id;
+    this.queueSaveChats();
+    this.postChatState();
+  }
+
+  selectChat(chatId) {
+    const chat = this.chats.find((item) => item.id === chatId);
+    if (!chat) {
+      return;
+    }
+    this.activeChatId = chat.id;
+    this.queueSaveChats();
+    this.postChatState();
+  }
+
+  addToHistory(role, text, chatId = this.activeChatId) {
+    const chat = this.ensureChat(chatId);
+    const timestamp = new Date().toISOString();
+    chat.messages.push({
+      role: String(role),
+      text: String(text || ""),
+      timestamp
+    });
+    if (role === "user" && !chat.messages.some((message, index) => index < chat.messages.length - 1 && message.role === "user")) {
+      chat.title = createChatTitle(text);
+    }
+    chat.updatedAt = timestamp;
+    this.activeChatId = chat.id;
+    this.queueSaveChats();
+    return chat;
+  }
+
+  getChatState() {
+    return {
+      activeChatId: this.activeChatId,
+      chats: [...this.chats].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+    };
+  }
+
+  postChatState() {
+    if (!this.view) {
+      return;
+    }
+    this.post({
+      type: "chatState",
+      state: this.getChatState()
+    });
+  }
+
+  async clearLegacyHistoryState() {
+    const legacyHistory = normalizeHistory(this.context.globalState.get("freeAi.history", []));
+    if (legacyHistory.length > 0) {
+      await this.context.globalState.update("freeAi.history", undefined);
+    }
   }
 
   resolveWebviewView(webviewView) {
@@ -108,7 +215,19 @@ class FreeAiViewProvider {
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
       if (message.type === "ask") {
-        await this.answer(message.prompt, message.provider, message.displayPrompt, message.attachedFiles);
+        await this.answer(
+          message.prompt,
+          message.provider,
+          message.displayPrompt,
+          message.attachedFiles,
+          message.chatId
+        );
+      }
+      if (message.type === "newChat") {
+        this.createNewChat();
+      }
+      if (message.type === "selectChat") {
+        this.selectChat(message.chatId);
       }
       if (message.type === "pickFiles") {
         await this.pickFilesForPrompt();
@@ -127,18 +246,20 @@ class FreeAiViewProvider {
       }
     });
 
-    this.loadHistory().then(() => {
+    this.loadChats().then(() => {
       webviewView.webview.html = this.getHtml(webviewView.webview);
     }).catch((error) => {
-      this.history = [];
+      const chat = createChatRecord();
+      this.chats = [chat];
+      this.activeChatId = chat.id;
       webviewView.webview.html = this.getHtml(webviewView.webview);
-      this.post({ type: "error", text: `Could not load history database: ${getErrorMessage(error)}` });
+      this.post({ type: "error", text: `Could not load chat database: ${getErrorMessage(error)}` });
     });
   }
 
   
 
-  async answer(prompt, provider, displayPrompt, attachedFiles) {
+  async answer(prompt, provider, displayPrompt, attachedFiles, chatId) {
     if (!this.view) {
       return;
     }
@@ -151,6 +272,8 @@ class FreeAiViewProvider {
     const routeText = text;
     let userDisplay = String(displayPrompt || text).trim();
     let editSourceFiles = Array.isArray(attachedFiles) ? [...attachedFiles] : [];
+    const chat = this.ensureChat(chatId);
+    const previousMessages = [...chat.messages];
 
     const referencedFiles = await this.resolveWorkspaceFileReferences(text);
     const hasReferencedFiles = referencedFiles.length > 0 || editSourceFiles.length > 0;
@@ -163,7 +286,8 @@ class FreeAiViewProvider {
       userDisplay += "\n\nAuto-read files:\n" + referencedFiles.map((file) => `- ${file.name}${file.truncated ? " (truncated)" : ""}`).join("\n");
     }
 
-    this.addToHistory("user", userDisplay);
+    this.addToHistory("user", userDisplay, chat.id);
+    text = appendConversationContext(text, previousMessages);
 
     this.post({ type: "status", text: "Thinking..." });
 
@@ -222,14 +346,25 @@ class FreeAiViewProvider {
       const edits = this.extractFirstAllowedEdits(successful, editSourceFiles);
       const visibleAnswer = formatProviderResults(results);
       
-      this.addToHistory("assistant", visibleAnswer);
+      this.addToHistory("assistant", visibleAnswer, chat.id);
       
-      this.post({ type: "answer", text: visibleAnswer, edits });
+      this.post({
+        type: "answer",
+        text: visibleAnswer,
+        edits,
+        chatId: chat.id,
+        chatState: this.getChatState()
+      });
       this.postProviderStatus();
     } catch (error) {
       const errorMsg = getErrorMessage(error);
-      this.addToHistory("error", errorMsg);
-      this.post({ type: "error", text: errorMsg });
+      this.addToHistory("error", errorMsg, chat.id);
+      this.post({
+        type: "error",
+        text: errorMsg,
+        chatId: chat.id,
+        chatState: this.getChatState()
+      });
     }
   }
 
