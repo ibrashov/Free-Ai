@@ -61,5 +61,7 @@ const cooled = {
 assert.equal(route({ prompt: "Explain maps", providerState: cooled }).providers[0].id, "gemini");
 
 assert.equal(_test.isQuotaOrRateLimitError("Provider rate limit reached"), true);
+assert.equal(_test.normalizeOllamaApiModel("ollama/gemma3:4b"), "gemma3:4b");
+assert.equal(_test.normalizeOllamaApiModel("qwen2.5-coder:3b"), "qwen2.5-coder:3b");
 
 console.log("router tests ok");

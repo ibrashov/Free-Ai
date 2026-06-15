@@ -9,6 +9,10 @@ const execFileAsync = promisify(execFile);
 const OPENCODE_PROVIDER = "opencode";
 const OPENCODE_MODEL = "anthropic/claude-sonnet-4-0";
 const DEFAULT_LOCAL_CODER_MODEL = "ollama/qwen2.5-coder:3b";
+const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
+const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
+const DISCOVERY_TIMEOUT_MS = 15000;
+const PROVIDER_TEST_TIMEOUT_MS = 60000;
 const PROVIDER_STATE_KEY = "freeAi.providerState";
 const DISCOVERY_FILE = "provider-candidates.json";
 
@@ -194,7 +198,7 @@ class FreeAiViewProvider {
               prompt: text,
               fallbackToOllama: config.openCodeFallbackToOllama
             })
-            : await askFreeProvider(config.gatewayUrl, config.authToken, selectedProvider, text, config.localCoderModel);
+            : await askFreeProvider(config, selectedProvider, text);
           if (!String(answer || "").trim()) {
             throw new Error("empty response");
           }
@@ -245,7 +249,12 @@ class FreeAiViewProvider {
       openCodeModel: config.get("openCodeModel", OPENCODE_MODEL),
       openCodeFallbackToOllama: config.get("openCodeFallbackToOllama", true),
       providerCooldownMinutes: config.get("providerCooldownMinutes", 10),
-      localCoderModel: config.get("localCoderModel", DEFAULT_LOCAL_CODER_MODEL)
+      localCoderModel: config.get("localCoderModel", DEFAULT_LOCAL_CODER_MODEL),
+      ollamaUrl: config.get("ollamaUrl", DEFAULT_OLLAMA_URL).replace(/\/$/, ""),
+      requestTimeoutMs: Math.max(
+        10000,
+        Number(config.get("requestTimeoutSeconds", DEFAULT_REQUEST_TIMEOUT_MS / 1000)) * 1000
+      )
     };
   }
 
@@ -319,11 +328,16 @@ class FreeAiViewProvider {
 
   async testProviders() {
     const config = this.getConfig();
+    const testConfig = {
+      ...config,
+      requestTimeoutMs: Math.min(config.requestTimeoutMs, PROVIDER_TEST_TIMEOUT_MS)
+    };
     const catalog = this.getCatalog(config).filter((provider) => provider.enabled);
     const results = [];
     this.post({ type: "status", text: "Testing Free AI providers..." });
 
     for (const provider of catalog) {
+      this.post({ type: "status", text: `Testing ${provider.label} (max 60s)...` });
       try {
         const answer = provider.id === OPENCODE_PROVIDER
           ? await askOpenCode({
@@ -332,9 +346,10 @@ class FreeAiViewProvider {
             localModel: config.localCoderModel,
             authToken: config.authToken,
             prompt: "Reply with exactly OK.",
-            fallbackToOllama: config.openCodeFallbackToOllama
+            fallbackToOllama: config.openCodeFallbackToOllama,
+            timeoutMs: testConfig.requestTimeoutMs
           })
-          : await askFreeProvider(config.gatewayUrl, config.authToken, provider, "Reply with exactly OK.", config.localCoderModel, 40);
+          : await askFreeProvider(testConfig, provider, "Reply with exactly OK.", 40);
         await this.markProviderReady(provider.id);
         results.push(`${provider.label}: OK${answer ? ` - ${String(answer).slice(0, 80)}` : ""}`);
       } catch (error) {
@@ -1148,7 +1163,7 @@ function safeJsonForHtml(value) {
     .replace(/\u2029/g, "\\u2029");
 }
 
-async function applyGatewayModel(gatewayUrl, model) {
+async function applyGatewayModel(gatewayUrl, model, timeoutMs = DISCOVERY_TIMEOUT_MS) {
   const payload = {
     values: {
       MODEL: model,
@@ -1161,57 +1176,58 @@ async function applyGatewayModel(gatewayUrl, model) {
     }
   };
 
-  const response = await fetch(`${gatewayUrl}/admin/api/config/apply`, {
+  const response = await fetchWithTimeout(`${gatewayUrl}/admin/api/config/apply`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
-  });
+  }, timeoutMs);
 
   if (!response.ok) {
     throw new Error(`Could not switch model: HTTP ${response.status}`);
   }
 }
 
-async function askFreeProvider(gatewayUrl, authToken, provider, prompt, localCoderModel, maxTokens = 1400) {
-  const selectedModel = provider.id === "ollama" ? (localCoderModel || provider.model) : provider.model;
+async function askFreeProvider(config, provider, prompt, maxTokens = 1400) {
+  const selectedModel = provider.id === "ollama"
+    ? (config.localCoderModel || provider.model)
+    : provider.model;
   if (String(selectedModel || "").startsWith("ollama/")) {
-    if (provider.id === "gemma" || /\/gemma/i.test(String(selectedModel))) {
-      return askOllamaCli(selectedModel, prompt);
-    }
-    return askOllamaDirect(selectedModel, prompt, maxTokens);
+    return askOllamaDirect(
+      config.ollamaUrl || DEFAULT_OLLAMA_URL,
+      selectedModel,
+      prompt,
+      maxTokens,
+      config.requestTimeoutMs || DEFAULT_REQUEST_TIMEOUT_MS
+    );
   }
-  await applyGatewayModel(gatewayUrl, selectedModel);
-  return askGateway(gatewayUrl, authToken, prompt, maxTokens);
-}
-
-async function askOllamaCli(model, prompt) {
-  const { stdout, stderr } = await execFileAsync(
-    "ollama",
-    ["run", normalizeOllamaApiModel(model), String(prompt || "")],
-    {
-      env: {
-        ...process.env,
-        OLLAMA_MODELS: process.env.OLLAMA_MODELS || "C:\\OllamaModels"
-      },
-      maxBuffer: 1024 * 1024 * 4,
-      timeout: 180000,
-      windowsHide: true
-    }
+  await applyGatewayModel(config.gatewayUrl, selectedModel);
+  return askGateway(
+    config.gatewayUrl,
+    config.authToken,
+    prompt,
+    maxTokens,
+    config.requestTimeoutMs || DEFAULT_REQUEST_TIMEOUT_MS
   );
-
-  return cleanTerminalText(stdout || stderr || "").trim();
 }
 
-async function askOllamaDirect(model, prompt, maxTokens = 1400) {
-  const response = await fetch("http://127.0.0.1:11434/api/chat", {
+async function askOllamaDirect(
+  ollamaUrl,
+  model,
+  prompt,
+  maxTokens = 1400,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+) {
+  const apiModel = normalizeOllamaApiModel(model);
+  const response = await fetchWithTimeout(`${ollamaUrl}/api/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: normalizeOllamaApiModel(model),
+      model: apiModel,
       stream: false,
       options: {
+        num_ctx: 2048,
         num_predict: maxTokens
       },
       messages: [
@@ -1225,10 +1241,17 @@ async function askOllamaDirect(model, prompt, maxTokens = 1400) {
         }
       ]
     })
-  });
+  }, timeoutMs);
 
   if (!response.ok) {
     const text = await response.text();
+    if (response.status === 404 || /model.+not found|pull model/i.test(text)) {
+      throw new Error(
+        `Ollama model "${apiModel}" is not visible to the active server. `
+        + `Restart Ollama with OLLAMA_MODELS=C:\\OllamaModels, for example: `
+        + `.\\scripts\\Repair-OllamaLocalModels.ps1 -Model ${apiModel}`
+      );
+    }
     throw new Error(text || `Ollama request failed: HTTP ${response.status}`);
   }
 
@@ -1243,7 +1266,8 @@ async function askOpenCode(options) {
     localModel,
     authToken,
     prompt,
-    fallbackToOllama
+    fallbackToOllama,
+    timeoutMs
   } = options || {};
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   if (!workspaceFolder) {
@@ -1267,7 +1291,8 @@ async function askOpenCode(options) {
       model: model || OPENCODE_MODEL,
       authToken,
       prompt: agentPrompt,
-      cwd: workspaceFolder.uri.fsPath
+      cwd: workspaceFolder.uri.fsPath,
+      timeoutMs
     });
   } catch (error) {
     if (!fallbackToOllama || !isQuotaOrRateLimitError(getErrorMessage(error))) {
@@ -1278,13 +1303,14 @@ async function askOpenCode(options) {
       model: normalizeOpenCodeOllamaModel(localModel || DEFAULT_LOCAL_CODER_MODEL),
       authToken,
       prompt: agentPrompt,
-      cwd: workspaceFolder.uri.fsPath
+      cwd: workspaceFolder.uri.fsPath,
+      timeoutMs
     });
   }
 }
 
 async function runOpenCode(options) {
-  const { command, model, authToken, prompt, cwd } = options;
+  const { command, model, authToken, prompt, cwd, timeoutMs } = options;
   const { stdout, stderr } = await execFileAsync(
     normalizeOpenCodeCommand(command),
     ["run", String(prompt || ""), "-m", model || OPENCODE_MODEL],
@@ -1295,7 +1321,7 @@ async function runOpenCode(options) {
         ANTHROPIC_API_KEY: authToken || "freecc"
       },
       maxBuffer: 1024 * 1024 * 8,
-      timeout: 180000,
+      timeout: timeoutMs || 180000,
       windowsHide: true
     }
   );
@@ -1574,7 +1600,7 @@ async function discoverFreeModelCandidates(config) {
   };
 
   await collectOpenRouterCandidates(result);
-  await collectOllamaCandidates(result);
+  await collectOllamaCandidates(result, config);
   await collectGatewayCandidates(result, config);
   await collectStaticCandidateHints(result);
 
@@ -1593,7 +1619,11 @@ async function discoverFreeModelCandidates(config) {
 
 async function collectOpenRouterCandidates(result) {
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/models");
+    const response = await fetchWithTimeout(
+      "https://openrouter.ai/api/v1/models",
+      {},
+      DISCOVERY_TIMEOUT_MS
+    );
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -1616,9 +1646,13 @@ async function collectOpenRouterCandidates(result) {
   }
 }
 
-async function collectOllamaCandidates(result) {
+async function collectOllamaCandidates(result, config) {
   try {
-    const response = await fetch("http://127.0.0.1:11434/api/tags");
+    const response = await fetchWithTimeout(
+      `${config.ollamaUrl || DEFAULT_OLLAMA_URL}/api/tags`,
+      {},
+      DISCOVERY_TIMEOUT_MS
+    );
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -1643,11 +1677,11 @@ async function collectOllamaCandidates(result) {
 
 async function collectGatewayCandidates(result, config) {
   try {
-    const response = await fetch(`${config.gatewayUrl}/v1/models`, {
+    const response = await fetchWithTimeout(`${config.gatewayUrl}/v1/models`, {
       headers: {
         Authorization: `Bearer ${config.authToken}`
       }
-    });
+    }, DISCOVERY_TIMEOUT_MS);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -1688,10 +1722,16 @@ async function collectStaticCandidateHints(result) {
   result.sources.push({ source: "static-hints", status: "ok", count: hints.length });
 }
 
-async function askGateway(gatewayUrl, authToken, prompt, maxTokens = 1400) {
+async function askGateway(
+  gatewayUrl,
+  authToken,
+  prompt,
+  maxTokens = 1400,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+) {
   const systemPrompt = getFreeAiSystemPrompt();
 
-  const response = await fetch(`${gatewayUrl}/v1/messages`, {
+  const response = await fetchWithTimeout(`${gatewayUrl}/v1/messages`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${authToken}`,
@@ -1706,7 +1746,7 @@ async function askGateway(gatewayUrl, authToken, prompt, maxTokens = 1400) {
         content: String(prompt || "")
       }]
     })
-  });
+  }, timeoutMs);
 
   if (!response.ok) {
     const text = await response.text();
@@ -1736,6 +1776,26 @@ Important rules:
 function normalizeOllamaApiModel(model) {
   const value = String(model || "").trim();
   return value.startsWith("ollama/") ? value.slice("ollama/".length) : value;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const duration = Math.max(1000, Number(timeoutMs) || DEFAULT_REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), duration);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.round(duration / 1000)}s: ${url}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function parseSseText(raw) {
@@ -1845,7 +1905,9 @@ module.exports = {
   _test: {
     buildProviderCatalog,
     classifyPrompt,
+    fetchWithTimeout,
     isQuotaOrRateLimitError,
+    normalizeOllamaApiModel,
     normalizeProviderState,
     selectRoute
   }

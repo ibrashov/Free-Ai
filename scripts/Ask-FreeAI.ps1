@@ -9,7 +9,11 @@ param(
 
     [string]$GatewayUrl = "http://127.0.0.1:8082",
 
-    [string]$AuthToken = "freecc"
+    [string]$AuthToken = "freecc",
+
+    [string]$OllamaUrl = "http://127.0.0.1:11434",
+
+    [int]$TimeoutSec = 120
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,27 +82,11 @@ $Prompt
 
 if ($expectedModel -and $expectedModel.StartsWith("ollama/")) {
     $ollamaModel = $expectedModel.Substring("ollama/".Length)
-    if ($SelectedProvider -eq "gemma" -or $ollamaModel -like "gemma*") {
-        $env:OLLAMA_MODELS = if ($env:OLLAMA_MODELS) { $env:OLLAMA_MODELS } else { "C:\OllamaModels" }
-        $oldErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        try {
-            $rawOllamaText = ollama run $ollamaModel $Prompt 2>$null | Out-String
-        } finally {
-            $ErrorActionPreference = $oldErrorActionPreference
-        }
-        $escape = [char]27
-        $cleanOllamaText = $rawOllamaText -replace "$escape\[[0-9;?]*[ -/]*[@-~]", ""
-        $cleanOllamaText = $cleanOllamaText -replace ".`b", ""
-        $cleanOllamaText = ($cleanOllamaText -split "`r?`n" | Where-Object { $_ -notmatch '^[\s\p{IsBraillePatterns}]+$' }) -join "`n"
-        $cleanOllamaText.Trim()
-        exit 0
-    }
-
     $ollamaBody = @{
         model = $ollamaModel
         stream = $false
         options = @{
+            num_ctx = 2048
             num_predict = $MaxTokens
         }
         messages = @(
@@ -113,12 +101,20 @@ if ($expectedModel -and $expectedModel.StartsWith("ollama/")) {
         )
     } | ConvertTo-Json -Depth 10 -Compress
 
-    $ollamaResponse = Invoke-RestMethod `
-        -Uri "http://127.0.0.1:11434/api/chat" `
-        -Method Post `
-        -Headers @{ "Content-Type" = "application/json" } `
-        -Body $ollamaBody `
-        -TimeoutSec 180
+    try {
+        $ollamaResponse = Invoke-RestMethod `
+            -Uri "$($OllamaUrl.TrimEnd('/'))/api/chat" `
+            -Method Post `
+            -Headers @{ "Content-Type" = "application/json" } `
+            -Body $ollamaBody `
+            -TimeoutSec $TimeoutSec
+    } catch {
+        $detail = if ($_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { $_.Exception.Message }
+        if ($detail -match 'model.+not found|pull model|404') {
+            throw "Ollama model '$ollamaModel' is not visible to the active server. Restart Ollama with OLLAMA_MODELS=C:\OllamaModels: .\scripts\Repair-OllamaLocalModels.ps1 -Model $ollamaModel"
+        }
+        throw
+    }
 
     $ollamaText = [string]$ollamaResponse.message.content
     if ([string]::IsNullOrWhiteSpace($ollamaText)) {
@@ -149,7 +145,7 @@ try {
             "Content-Type" = "application/json"
         } `
         -Body $body `
-        -TimeoutSec 180
+        -TimeoutSec $TimeoutSec
 } catch {
     if ($_.ErrorDetails.Message) {
         throw $_.ErrorDetails.Message

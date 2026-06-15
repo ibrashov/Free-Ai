@@ -221,6 +221,12 @@ Free AI: Open Provider Status
 
 The refresh command stores discovered model candidates locally in VS Code extension storage. Candidates are not enabled automatically.
 
+Local provider calls use the Ollama HTTP API and stop after `freeAiConsole.requestTimeoutSeconds` (120 seconds by default). They do not silently pull missing models. If Gemma is installed in `C:\OllamaModels` but the active server does not list it, restart Ollama with:
+
+```powershell
+.\scripts\Repair-OllamaLocalModels.ps1 -Model gemma3:4b
+```
+
 ## Free Limits And Local Survival
 
 For the current no-card strategy, provider limits, and the Ollama repair workflow, see:

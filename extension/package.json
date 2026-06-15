@@ -129,6 +129,18 @@
           "type": "string",
           "default": "ollama/qwen2.5-coder:3b",
           "description": "Local Ollama model used for survival mode and OpenCode fallback."
+        },
+        "freeAiConsole.ollamaUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "Local Ollama API URL."
+        },
+        "freeAiConsole.requestTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 10,
+          "maximum": 600,
+          "description": "Maximum time for one provider request before the test or chat moves on."
         }
       }
     }

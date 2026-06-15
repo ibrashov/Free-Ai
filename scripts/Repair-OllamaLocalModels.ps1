@@ -1,7 +1,11 @@
 param(
     [string]$ModelDir = "C:\OllamaModels",
 
-    [string]$Model = "qwen2.5-coder:3b"
+    [string]$Model = "qwen2.5-coder:3b",
+
+    [int]$StartupTimeoutSec = 30,
+
+    [int]$TestTimeoutSec = 120
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,13 +27,46 @@ if (-not (Test-Path $ollamaExe)) {
 
 Write-Host "Starting Ollama with OLLAMA_MODELS=$ModelDir"
 Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden
-Start-Sleep -Seconds 3
+
+$ready = $false
+$deadline = (Get-Date).AddSeconds($StartupTimeoutSec)
+while ((Get-Date) -lt $deadline) {
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/version" -TimeoutSec 2 | Out-Null
+        $ready = $true
+        break
+    } catch {
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+if (-not $ready) {
+    throw "Ollama did not become ready within $StartupTimeoutSec seconds."
+}
 
 Write-Host "Pulling/verifying model: $Model"
 ollama pull $Model
 
 Write-Host "Testing model..."
-ollama run $Model "Reply exactly OK"
+$testBody = @{
+    model = $Model
+    prompt = "Reply exactly OK"
+    stream = $false
+    keep_alive = 0
+    options = @{
+        num_ctx = 2048
+        num_predict = 4
+    }
+} | ConvertTo-Json -Depth 6 -Compress
+
+$testResult = Invoke-RestMethod `
+    -Uri "http://127.0.0.1:11434/api/generate" `
+    -Method Post `
+    -ContentType "application/json" `
+    -Body $testBody `
+    -TimeoutSec $TestTimeoutSec
+
+Write-Host "Response: $($testResult.response)"
 
 Write-Host ""
 Write-Host "Ollama local mode is ready."

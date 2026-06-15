@@ -68,7 +68,15 @@ The script sets:
 OLLAMA_MODELS=C:\OllamaModels
 ```
 
-Then it restarts Ollama, pulls `qwen2.5-coder:3b`, and tests it.
+Then it restarts Ollama, verifies the requested model, and tests it through the HTTP API with a timeout.
+
+For Gemma Local:
+
+```powershell
+.\scripts\Repair-OllamaLocalModels.ps1 -Model gemma3:4b
+```
+
+The environment variable must be present on the Ollama server process. Setting it only on an `ollama run` client does not change the model directory used by an already-running server.
 
 ## Sources
 
