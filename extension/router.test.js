@@ -42,6 +42,10 @@ function route(input) {
 
 assert.equal(route({ prompt: "Explain promises simply" }).mode, "Cheap");
 assert.equal(route({ prompt: "Explain promises simply" }).providers[0].id, "gemini-fast");
+const manualGeminiFast = route({ prompt: "Explain APIs", requestedProvider: "gemini-fast" });
+assert.equal(manualGeminiFast.providers[0].id, "gemini-fast");
+assert.equal(manualGeminiFast.providers[1].id, "ollama");
+assert.equal(route({ prompt: "Explain APIs", requestedProvider: "ollama" }).providers.length, 1);
 
 assert.equal(route({ prompt: "проверь весь проект" }).mode, "Agent");
 assert.equal(route({ prompt: "проверь весь проект" }).providers[0].id, "opencode");

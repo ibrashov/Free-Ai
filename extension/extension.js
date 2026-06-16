@@ -1762,10 +1762,14 @@ function selectRoute(options) {
 
   if (requestedProvider && requestedProvider !== "auto") {
     const manualProvider = enabled.find((provider) => provider.id === requestedProvider) || enabled[0];
+    const providers = manualProvider ? [manualProvider] : [];
+    if (manualProvider?.role === "chat" && localProvider && localProvider.id !== manualProvider.id) {
+      providers.push(localProvider);
+    }
     return {
       mode: manualProvider?.role === "agent" ? "Agent" : manualProvider?.role === "local-fallback" ? "Local" : "Manual",
-      reason: "Manual provider selection",
-      providers: manualProvider ? [manualProvider] : [],
+      reason: manualProvider?.role === "chat" ? "Manual provider selection with local fallback" : "Manual provider selection",
+      providers,
       compare: false
     };
   }
