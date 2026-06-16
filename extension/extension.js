@@ -400,9 +400,10 @@ class FreeAiViewProvider {
 
   async markProviderReady(providerId) {
     const current = this.providerState[providerId] || {};
+    const provider = providerCatalog.find((item) => item.id === providerId);
     this.providerState[providerId] = {
       ...current,
-      status: providerId === "ollama" ? "Local" : "Ready",
+      status: provider?.role === "local-fallback" ? "Local" : "Ready",
       lastError: "",
       cooldownUntil: 0,
       updatedAt: new Date().toISOString()
@@ -1736,6 +1737,10 @@ function selectProviders(prompt, requestedProvider) {
     return ["gemma", "ollama", "cerebras"];
   }
 
+  if (/(локально|офлайн|приват|без интернета|на ноуте)/i.test(lower)) {
+    return ["ollama", "cerebras"];
+  }
+
   if (/(offline|local|private|privacy|ollama|локально|офлайн|приват)/i.test(lower)) {
     return ["ollama", "cerebras"];
   }
@@ -1744,13 +1749,16 @@ function selectProviders(prompt, requestedProvider) {
 }
 
 function shouldUseOpenCodeAgent(lowerPrompt) {
+  if (/(проект|кодбейс|репозит[оа]р|прочитай файл|прочитай файлы|проверь проект|проверь код|исправ|измен|отредакт|рефактор)/i.test(lowerPrompt)) {
+    return true;
+  }
   return /(project|codebase|workspace|repo|repository|read files|check files|review project|fix|edit|change|modify|refactor|проект|кодбейс|репозитор|прочитай файл|прочитай файлы|проверь проект|проверь код|исправь|измени|отредактируй|рефактор)/i.test(lowerPrompt);
 }
 
 function selectRoute(options) {
   const { prompt, requestedProvider, autoMode, catalog, providerState, hasReferencedFiles } = options;
   const enabled = catalog.filter((provider) => provider.enabled);
-  const localProvider = enabled.find((provider) => provider.role === "local-fallback") || enabled.find((provider) => provider.id === "ollama");
+  const localProvider = getPreferredLocalProvider(enabled);
 
   if (requestedProvider && requestedProvider !== "auto") {
     const manualProvider = enabled.find((provider) => provider.id === requestedProvider) || enabled[0];
@@ -1760,6 +1768,18 @@ function selectRoute(options) {
       providers: manualProvider ? [manualProvider] : [],
       compare: false
     };
+  }
+
+  if (/\bgemma\b/i.test(String(prompt || ""))) {
+    const gemmaProvider = enabled.find((provider) => provider.id === "gemma");
+    if (gemmaProvider) {
+      return {
+        mode: "Local",
+        reason: "Gemma was requested explicitly",
+        providers: [gemmaProvider],
+        compare: false
+      };
+    }
   }
 
   if (autoMode === "survival") {
@@ -1820,20 +1840,23 @@ function selectRoute(options) {
 
 function classifyPrompt(prompt, hasReferencedFiles) {
   const text = String(prompt || "").toLowerCase();
+  const cyrillicProjectWide = /(проект|кодбейс|репозит[оа]р|весь проект|всю папку|workspace)/i.test(text);
+  const cyrillicEditIntent = /(исправ|измен|отредакт|рефактор|почин|добав|удал|перепиш)/i.test(text);
+  const cyrillicLocalIntent = /(локально|офлайн|приват|без интернета|на ноуте)/i.test(text);
   const projectWide = /(project|codebase|workspace|repo|repository|whole project|entire project|проект|кодбейс|репозитор|весь проект|всю папку|workspace)/i.test(text);
   const editIntent = /(fix|edit|change|modify|refactor|apply|write|исправь|измени|отредактируй|рефактор|почини|добавь|удали|перепиши)/i.test(text);
   const localIntent = /(offline|local|private|privacy|ollama|gemma|локально|офлайн|приват|без интернета|на ноуте)/i.test(text);
 
-  if (projectWide || editIntent) {
+  if (projectWide || editIntent || cyrillicProjectWide || cyrillicEditIntent) {
     return {
       agent: true,
       local: false,
       fileReview: false,
-      reason: projectWide ? "Project-wide request needs OpenCode Agent" : "Edit/change request needs OpenCode Agent"
+      reason: projectWide || cyrillicProjectWide ? "Project-wide request needs OpenCode Agent" : "Edit/change request needs OpenCode Agent"
     };
   }
 
-  if (localIntent) {
+  if (localIntent || cyrillicLocalIntent) {
     return {
       agent: false,
       local: true,
@@ -1848,6 +1871,13 @@ function classifyPrompt(prompt, hasReferencedFiles) {
     fileReview: Boolean(hasReferencedFiles),
     reason: hasReferencedFiles ? "Named file context was auto-read" : "Simple chat request"
   };
+}
+
+function getPreferredLocalProvider(providers) {
+  const localProviders = providers.filter((provider) => provider.role === "local-fallback" || provider.id === "ollama");
+  return localProviders.find((provider) => provider.id === "ollama")
+    || localProviders.find((provider) => normalizeOllamaApiModel(provider.model) === normalizeOllamaApiModel(DEFAULT_LOCAL_CODER_MODEL))
+    || localProviders.sort((a, b) => a.priority - b.priority)[0];
 }
 
 function firstReadyProviders(providers, providerState, count) {
