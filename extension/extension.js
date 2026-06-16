@@ -967,7 +967,7 @@ class FreeAiViewProvider {
   <div id="attached-files" class="attached-files"></div>
   <div class="prompt-actions">
     <button id="add-file" title="Attach text/code files so Free AI can read them">Add file</button>
-    <button id="send">Send</button>
+    <button id="send" title="Send message (Enter)" aria-label="Send message">Send</button>
   </div>
   <div id="messages" class="messages"></div>
 
@@ -1015,7 +1015,8 @@ class FreeAiViewProvider {
     });
     sendEl.addEventListener("click", send);
     promptEl.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
         send();
       }
     });
@@ -1070,6 +1071,7 @@ class FreeAiViewProvider {
     
 
     function send() {
+      if (sendEl.disabled) return;
       const basePrompt = promptEl.value.trim();
       if (!basePrompt && attachedFiles.length === 0) return;
       const prompt = buildPromptWithFiles(basePrompt);

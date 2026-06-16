@@ -282,7 +282,7 @@ local logs
 - Open this workspace in VS Code.
 - Press `F5` to launch the Extension Development Host.
 - In the new host window open the Free AI view from the activity bar or run the command `Free AI: Open Chat`.
-- Type a prompt and press Send (or Ctrl/Cmd+Enter).
+- Type a prompt and press Send, or press Enter. Use Shift+Enter for a new line.
 
 ## Request History
 

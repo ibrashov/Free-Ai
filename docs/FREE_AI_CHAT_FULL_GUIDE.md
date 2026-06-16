@@ -184,7 +184,9 @@ Write a simple Dart class for a lesson model
 Отправка:
 
 - кнопка **Send**;
-- или `Ctrl+Enter`.
+- или `Enter`.
+
+`Shift+Enter` оставляет новую строку в поле ввода.
 
 ## 7. Провайдеры
 
