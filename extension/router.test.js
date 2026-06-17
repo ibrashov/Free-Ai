@@ -131,6 +131,37 @@ assert.match(conversationPrompt, /Nice to meet you/);
 assert.doesNotMatch(conversationPrompt, /temporary failure/);
 assert.match(conversationPrompt, /Current user request:\nWhat is my name\?/);
 
+const deleteProvider = new _test.FreeAiViewProvider({}, {
+  globalStorageUri: {},
+  globalState: {
+    get: (_key, fallback) => fallback,
+    update: async () => {}
+  }
+});
+let deleteSaveQueued = false;
+const deletePosts = [];
+deleteProvider.queueSaveChats = () => {
+  deleteSaveQueued = true;
+};
+deleteProvider.post = (message) => {
+  deletePosts.push(message);
+};
+deleteProvider.view = {};
+deleteProvider.chats = [firstChat, secondChat];
+deleteProvider.activeChatId = firstChat.id;
+deleteProvider.deleteChat(firstChat.id);
+assert.equal(deleteProvider.chats.some((chat) => chat.id === firstChat.id), false);
+assert.equal(deleteProvider.activeChatId, secondChat.id);
+assert.equal(deleteSaveQueued, true);
+assert.equal(deletePosts[0].type, "chatState");
+
+deleteProvider.chats = [secondChat];
+deleteProvider.activeChatId = secondChat.id;
+deleteProvider.deleteChat(secondChat.id);
+assert.equal(deleteProvider.chats.length, 1);
+assert.notEqual(deleteProvider.chats[0].id, secondChat.id);
+assert.equal(deleteProvider.activeChatId, deleteProvider.chats[0].id);
+
 const viewProvider = new _test.FreeAiViewProvider({}, {
   globalStorageUri: {},
   globalState: {
@@ -165,6 +196,9 @@ function createWebviewHarness(script) {
       addEventListener(type, listener) {
         windowListeners[type] = windowListeners[type] || [];
         windowListeners[type].push(listener);
+      },
+      confirm() {
+        return true;
       }
     },
     acquireVsCodeApi: () => ({
@@ -214,6 +248,7 @@ function createMockDocument() {
     "attached-files",
     "toggle-chats",
     "new-chat",
+    "delete-active-chat",
     "chat-panel",
     "chat-list",
     "active-chat-title",
@@ -261,6 +296,7 @@ class MockElement {
     this.parentElement = null;
     this.classList = createClassList(this);
     this._textContent = "";
+    this.attributes = {};
   }
 
   get textContent() {
@@ -275,6 +311,10 @@ class MockElement {
   addEventListener(type, listener) {
     this.listeners[type] = this.listeners[type] || [];
     this.listeners[type].push(listener);
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
   }
 
   dispatchEvent(type, init = {}) {
@@ -448,5 +488,20 @@ const windowEnterEvent = dispatchWindowKey(webview, "window prompt", { key: "Ent
 assert.equal(webview.messages.length, 7);
 assert.equal(webview.messages[6].prompt, "window prompt");
 assert.equal(windowEnterEvent.defaultPrevented, true);
+
+const deleteButton = findElement(
+  webview.document.getElementById("chat-list"),
+  (element) => hasClass(element, "chat-delete")
+);
+assert.ok(deleteButton, "chat delete button should be rendered");
+deleteButton.dispatchEvent("click");
+assert.equal(webview.messages.length, 8);
+assert.equal(webview.messages[7].type, "deleteChat");
+assert.equal(webview.messages[7].chatId, firstChat.id);
+
+webview.document.getElementById("delete-active-chat").dispatchEvent("click");
+assert.equal(webview.messages.length, 9);
+assert.equal(webview.messages[8].type, "deleteChat");
+assert.equal(webview.messages[8].chatId, firstChat.id);
 
 console.log("router tests ok");

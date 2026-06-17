@@ -129,6 +129,10 @@ class FreeAiViewProvider {
     return this.chats.find((chat) => chat.id === this.activeChatId) || null;
   }
 
+  getSortedChats() {
+    return [...this.chats].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
+
   ensureChat(chatId, activate = true) {
     const requested = this.chats.find((chat) => chat.id === chatId);
     if (requested) {
@@ -167,6 +171,28 @@ class FreeAiViewProvider {
     this.postChatState();
   }
 
+  deleteChat(chatId) {
+    const id = String(chatId || "");
+    const existing = this.chats.find((item) => item.id === id);
+    if (!existing) {
+      return;
+    }
+
+    const wasActive = this.activeChatId === id;
+    this.chats = this.chats.filter((item) => item.id !== id);
+
+    if (this.chats.length === 0) {
+      const chat = createChatRecord();
+      this.chats = [chat];
+      this.activeChatId = chat.id;
+    } else if (wasActive || !this.getActiveChat()) {
+      this.activeChatId = this.getSortedChats()[0].id;
+    }
+
+    this.queueSaveChats();
+    this.postChatState();
+  }
+
   addToHistory(role, text, chatId = this.activeChatId, activate = true) {
     const chat = this.ensureChat(chatId, activate);
     const timestamp = new Date().toISOString();
@@ -189,7 +215,7 @@ class FreeAiViewProvider {
   getChatState() {
     return {
       activeChatId: this.activeChatId,
-      chats: [...this.chats].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+      chats: this.getSortedChats()
     };
   }
 
@@ -225,6 +251,9 @@ class FreeAiViewProvider {
       }
       if (message.type === "selectChat") {
         this.selectChat(message.chatId);
+      }
+      if (message.type === "deleteChat") {
+        this.deleteChat(message.chatId);
       }
       if (message.type === "pickFiles") {
         await this.pickFilesForPrompt();
@@ -706,7 +735,7 @@ class FreeAiViewProvider {
     }
     .chat-header {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
       align-items: center;
       gap: 8px;
       margin-bottom: 10px;
@@ -739,7 +768,14 @@ class FreeAiViewProvider {
       max-height: 260px;
       overflow-y: auto;
     }
+    .chat-item-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 72px;
+      gap: 4px;
+      align-items: stretch;
+    }
     .chat-item {
+      min-width: 0;
       width: 100%;
       padding: 8px;
       color: var(--vscode-foreground);
@@ -765,6 +801,19 @@ class FreeAiViewProvider {
       margin-top: 3px;
       font-size: 11px;
       opacity: 0.7;
+    }
+    .chat-delete {
+      align-self: stretch;
+      padding: 0 8px;
+      color: var(--vscode-errorForeground);
+      background: transparent;
+      border: 1px solid transparent;
+      min-width: 64px;
+      white-space: nowrap;
+    }
+    .chat-delete:hover {
+      background: var(--vscode-list-hoverBackground);
+      border-color: var(--vscode-inputValidation-errorBorder);
     }
     .toolbar-left {
       flex: 1;
@@ -924,6 +973,7 @@ class FreeAiViewProvider {
   <div class="chat-header">
     <button id="toggle-chats" title="Open chat history">Chats</button>
     <div id="active-chat-title" class="chat-title">New chat</div>
+    <button id="delete-active-chat" title="Delete active chat permanently">Delete</button>
     <button id="new-chat" title="Start a new chat">New chat</button>
   </div>
   <div id="chat-panel" class="chat-panel">
@@ -971,6 +1021,7 @@ class FreeAiViewProvider {
     const attachedFilesEl = document.getElementById("attached-files");
     const toggleChatsEl = document.getElementById("toggle-chats");
     const newChatEl = document.getElementById("new-chat");
+    const deleteActiveChatEl = document.getElementById("delete-active-chat");
     const chatPanelEl = document.getElementById("chat-panel");
     const chatListEl = document.getElementById("chat-list");
     const activeChatTitleEl = document.getElementById("active-chat-title");
@@ -990,6 +1041,9 @@ class FreeAiViewProvider {
     newChatEl.addEventListener("click", () => {
       chatPanelEl.classList.remove("visible");
       vscode.postMessage({ type: "newChat" });
+    });
+    deleteActiveChatEl.addEventListener("click", () => {
+      confirmDeleteChat(getActiveChat());
     });
     addFileEl.addEventListener("click", () => {
       vscode.postMessage({ type: "pickFiles" });
@@ -1196,14 +1250,27 @@ class FreeAiViewProvider {
       renderChatList();
       const chat = getActiveChat();
       activeChatTitleEl.textContent = chat ? chat.title : "New chat";
+      deleteActiveChatEl.disabled = !chat;
       if (renderMessages) {
         renderActiveChat();
       }
     }
 
+    function confirmDeleteChat(chat) {
+      if (!chat) return;
+      const titleText = chat.title || "New chat";
+      if (!window.confirm("Delete this chat permanently?\\n\\n" + titleText)) {
+        return;
+      }
+      vscode.postMessage({ type: "deleteChat", chatId: chat.id });
+    }
+
     function renderChatList() {
       chatListEl.textContent = "";
       (chatState.chats || []).forEach((chat) => {
+        const row = document.createElement("div");
+        row.className = "chat-item-row";
+
         const item = document.createElement("button");
         item.className = "chat-item" + (chat.id === activeChatId ? " active" : "");
         item.type = "button";
@@ -1224,7 +1291,22 @@ class FreeAiViewProvider {
           chatPanelEl.classList.remove("visible");
           vscode.postMessage({ type: "selectChat", chatId: chat.id });
         });
-        chatListEl.appendChild(item);
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "chat-delete";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.title = "Delete this chat permanently";
+        deleteButton.setAttribute("aria-label", "Delete chat");
+        deleteButton.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          confirmDeleteChat(chat);
+        });
+
+        row.appendChild(item);
+        row.appendChild(deleteButton);
+        chatListEl.appendChild(row);
       });
     }
 
