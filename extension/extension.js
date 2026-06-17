@@ -1014,12 +1014,10 @@ class FreeAiViewProvider {
       vscode.postMessage({ type: "refreshModels" });
     });
     sendEl.addEventListener("click", send);
-    promptEl.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-        event.preventDefault();
-        send();
-      }
-    });
+    promptEl.addEventListener("keydown", handlePromptSubmitKey, true);
+    promptEl.addEventListener("keypress", handlePromptSubmitKey, true);
+    window.addEventListener("keydown", handlePromptSubmitKey, true);
+    window.addEventListener("keypress", handlePromptSubmitKey, true);
 
     window.addEventListener("message", (event) => {
       const message = event.data;
@@ -1093,6 +1091,27 @@ class FreeAiViewProvider {
       promptEl.value = "";
       attachedFiles = [];
       renderAttachedFiles();
+    }
+
+    function handlePromptSubmitKey(event) {
+      if (event.target && event.target !== promptEl) return;
+      if (!isPromptSubmitKey(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      send();
+    }
+
+    function isPromptSubmitKey(event) {
+      const key = String(event.key || "").toLowerCase();
+      const code = String(event.code || "").toLowerCase();
+      const keyCode = event.keyCode || event.which;
+      const isEnter = key === "enter"
+        || key === "numpadenter"
+        || code === "enter"
+        || code === "numpadenter"
+        || keyCode === 13;
+      const isComposing = event.isComposing || keyCode === 229;
+      return isEnter && !event.shiftKey && !isComposing;
     }
 
     function buildPromptWithFiles(basePrompt) {

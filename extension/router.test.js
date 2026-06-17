@@ -106,4 +106,308 @@ const scriptMatch = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/);
 assert.ok(scriptMatch, "webview script should be present");
 new vm.Script(scriptMatch[1]);
 
+function dispatchPromptKey(webview, prompt, event) {
+  webview.promptEl.value = prompt;
+  return webview.promptEl.dispatchEvent("keydown", event);
+}
+
+function dispatchWindowKey(webview, prompt, event) {
+  webview.promptEl.value = prompt;
+  return webview.dispatchWindowKeyboard("keydown", event);
+}
+
+function createWebviewHarness(script) {
+  const document = createMockDocument();
+  const messages = [];
+  const windowListeners = {};
+  const context = {
+    document,
+    window: {
+      addEventListener(type, listener) {
+        windowListeners[type] = windowListeners[type] || [];
+        windowListeners[type].push(listener);
+      }
+    },
+    acquireVsCodeApi: () => ({
+      postMessage(message) {
+        messages.push(message);
+      }
+    }),
+    console
+  };
+
+  context.window.dispatchMessage = (data) => {
+    for (const listener of windowListeners.message || []) {
+      listener({ data });
+    }
+  };
+  context.window.dispatchKeyboard = (type, init = {}) => {
+    const event = createMockEvent(type, {
+      target: document.getElementById("prompt"),
+      ...init
+    }, context.window);
+    for (const listener of windowListeners[type] || []) {
+      listener(event);
+    }
+    return event;
+  };
+
+  vm.createContext(context);
+  new vm.Script(script).runInContext(context);
+
+  return {
+    document,
+    messages,
+    promptEl: document.getElementById("prompt"),
+    sendEl: document.getElementById("send"),
+    dispatchWindowMessage: context.window.dispatchMessage,
+    dispatchWindowKeyboard: context.window.dispatchKeyboard
+  };
+}
+
+function createMockDocument() {
+  const ids = [
+    "prompt",
+    "provider",
+    "messages",
+    "send",
+    "add-file",
+    "attached-files",
+    "toggle-chats",
+    "new-chat",
+    "chat-panel",
+    "chat-list",
+    "active-chat-title",
+    "route-line",
+    "provider-list",
+    "status-providers",
+    "test-providers",
+    "refresh-models"
+  ];
+  const elements = new Map(ids.map((id) => [id, new MockElement("div", id)]));
+  const created = [];
+  elements.get("provider").value = "auto";
+
+  return {
+    createElement(tagName) {
+      const element = new MockElement(tagName);
+      created.push(element);
+      return element;
+    },
+    getElementById(id) {
+      if (elements.has(id)) {
+        return elements.get(id);
+      }
+
+      for (const root of [...elements.values(), ...created]) {
+        const match = findElement(root, (element) => element.id === id);
+        if (match) {
+          return match;
+        }
+      }
+      return null;
+    }
+  };
+}
+
+class MockElement {
+  constructor(tagName, id = "") {
+    this.tagName = tagName;
+    this.id = id;
+    this.value = "";
+    this.disabled = false;
+    this.className = "";
+    this.children = [];
+    this.listeners = {};
+    this.parentElement = null;
+    this.classList = createClassList(this);
+    this._textContent = "";
+  }
+
+  get textContent() {
+    return this._textContent;
+  }
+
+  set textContent(value) {
+    this._textContent = String(value);
+    this.children = [];
+  }
+
+  addEventListener(type, listener) {
+    this.listeners[type] = this.listeners[type] || [];
+    this.listeners[type].push(listener);
+  }
+
+  dispatchEvent(type, init = {}) {
+    const event = createMockEvent(type, init, this);
+
+    for (const listener of this.listeners[type] || []) {
+      listener(event);
+    }
+    return event;
+  }
+
+  appendChild(child) {
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+
+  remove() {
+    if (!this.parentElement) return;
+    this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+    this.parentElement = null;
+  }
+
+  querySelector(selector) {
+    if (!selector.startsWith(".")) {
+      return null;
+    }
+    const className = selector.slice(1);
+    return findElement(this, (element) => hasClass(element, className), false);
+  }
+
+  scrollIntoView() {}
+}
+
+function createMockEvent(type, init = {}, target = null) {
+  return {
+    type,
+    target,
+    key: "",
+    code: "",
+    shiftKey: false,
+    isComposing: false,
+    keyCode: 0,
+    which: 0,
+    defaultPrevented: false,
+    propagationStopped: false,
+    ...init,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    stopPropagation() {
+      this.propagationStopped = true;
+    }
+  };
+}
+
+function createClassList(element) {
+  return {
+    add(className) {
+      setClasses(element, [...getClasses(element), className]);
+    },
+    remove(className) {
+      setClasses(element, getClasses(element).filter((item) => item !== className));
+    },
+    toggle(className, force) {
+      const classes = getClasses(element);
+      const exists = classes.includes(className);
+      const shouldHave = force === undefined ? !exists : Boolean(force);
+      if (shouldHave && !exists) {
+        classes.push(className);
+      }
+      if (!shouldHave && exists) {
+        classes.splice(classes.indexOf(className), 1);
+      }
+      setClasses(element, classes);
+      return shouldHave;
+    },
+    contains(className) {
+      return getClasses(element).includes(className);
+    }
+  };
+}
+
+function getClasses(element) {
+  return String(element.className || "").split(/\s+/).filter(Boolean);
+}
+
+function setClasses(element, classes) {
+  element.className = [...new Set(classes.filter(Boolean))].join(" ");
+}
+
+function hasClass(element, className) {
+  return getClasses(element).includes(className);
+}
+
+function findElement(root, predicate, includeRoot = true) {
+  if (includeRoot && predicate(root)) {
+    return root;
+  }
+  for (const child of root.children || []) {
+    const match = findElement(child, predicate, true);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+}
+
+const webview = createWebviewHarness(scriptMatch[1]);
+assert.ok((webview.promptEl.listeners.keydown || []).length >= 1);
+assert.ok((webview.promptEl.listeners.keypress || []).length >= 1);
+
+webview.promptEl.value = "clicked prompt";
+webview.sendEl.dispatchEvent("click");
+assert.equal(webview.messages.length, 1);
+assert.equal(webview.messages[0].type, "ask");
+assert.equal(webview.messages[0].prompt, "clicked prompt");
+assert.equal(webview.promptEl.value, "");
+assert.equal(webview.sendEl.disabled, true);
+webview.dispatchWindowMessage({ type: "answer", text: "OK" });
+assert.equal(webview.sendEl.disabled, false);
+
+const enterEvent = dispatchPromptKey(webview, "enter prompt", { key: "Enter", code: "Enter" });
+assert.equal(webview.messages.length, 2);
+assert.equal(webview.messages[1].prompt, "enter prompt");
+assert.equal(enterEvent.defaultPrevented, true);
+assert.equal(enterEvent.propagationStopped, true);
+webview.dispatchWindowMessage({ type: "answer", text: "OK" });
+
+const processEnterEvent = dispatchPromptKey(webview, "process enter prompt", { key: "Process", code: "Enter" });
+assert.equal(webview.messages.length, 3);
+assert.equal(webview.messages[2].prompt, "process enter prompt");
+assert.equal(processEnterEvent.defaultPrevented, true);
+webview.dispatchWindowMessage({ type: "answer", text: "OK" });
+
+const numpadEnterEvent = dispatchPromptKey(webview, "numpad prompt", { key: "", code: "NumpadEnter" });
+assert.equal(webview.messages.length, 4);
+assert.equal(webview.messages[3].prompt, "numpad prompt");
+assert.equal(numpadEnterEvent.defaultPrevented, true);
+webview.dispatchWindowMessage({ type: "answer", text: "OK" });
+
+const shiftEnterEvent = dispatchPromptKey(webview, "line one", { key: "Enter", code: "Enter", shiftKey: true });
+assert.equal(webview.messages.length, 4);
+assert.equal(shiftEnterEvent.defaultPrevented, false);
+assert.equal(webview.promptEl.value, "line one");
+
+const composingEnterEvent = dispatchPromptKey(webview, "compose prompt", {
+  key: "Enter",
+  code: "Enter",
+  isComposing: true,
+  keyCode: 229
+});
+assert.equal(webview.messages.length, 4);
+assert.equal(composingEnterEvent.defaultPrevented, false);
+assert.equal(webview.promptEl.value, "compose prompt");
+
+const keyCodeEnterEvent = dispatchPromptKey(webview, "keycode prompt", { keyCode: 13, which: 13 });
+assert.equal(webview.messages.length, 5);
+assert.equal(webview.messages[4].prompt, "keycode prompt");
+assert.equal(keyCodeEnterEvent.defaultPrevented, true);
+webview.dispatchWindowMessage({ type: "answer", text: "OK" });
+
+webview.promptEl.value = "keypress prompt";
+const keypressEnterEvent = webview.promptEl.dispatchEvent("keypress", { key: "Enter" });
+assert.equal(webview.messages.length, 6);
+assert.equal(webview.messages[5].prompt, "keypress prompt");
+assert.equal(keypressEnterEvent.defaultPrevented, true);
+webview.dispatchWindowMessage({ type: "answer", text: "OK" });
+
+const windowEnterEvent = dispatchWindowKey(webview, "window prompt", { key: "Enter", code: "Enter" });
+assert.equal(webview.messages.length, 7);
+assert.equal(webview.messages[6].prompt, "window prompt");
+assert.equal(windowEnterEvent.defaultPrevented, true);
+
 console.log("router tests ok");
