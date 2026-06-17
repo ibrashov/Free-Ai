@@ -206,10 +206,11 @@ Ollama
 
 ```text
 обычный запрос -> Cerebras
+compare -> Cerebras/Groq/OpenRouter
 offline/local/private/ollama -> Ollama
 ```
 
-Это сделано потому, что бесплатные провайдеры могут быть нестабильны.
+Gemini и Gemini Fast доступны вручную, но Auto их избегает, чтобы не расходовать маленькую free quota на обычные запросы и проверки провайдеров.
 
 ## 8. Чтение файлов через Add file
 

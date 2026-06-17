@@ -9,6 +9,7 @@
     "supportsTools": false,
     "supportsOpenCode": false,
     "priority": 10,
+    "autoEnabled": false,
     "enabled": true
   },
   {
@@ -21,6 +22,7 @@
     "supportsTools": false,
     "supportsOpenCode": false,
     "priority": 15,
+    "autoEnabled": false,
     "enabled": true
   },
   {

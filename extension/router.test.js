@@ -41,7 +41,8 @@ function route(input) {
 }
 
 assert.equal(route({ prompt: "Explain promises simply" }).mode, "Cheap");
-assert.equal(route({ prompt: "Explain promises simply" }).providers[0].id, "gemini-fast");
+assert.equal(route({ prompt: "Explain promises simply" }).providers[0].id, "cerebras");
+assert.ok(!route({ prompt: "Explain promises simply" }).providers.some((provider) => provider.id === "gemini-fast"));
 const manualGeminiFast = route({ prompt: "Explain APIs", requestedProvider: "gemini-fast" });
 assert.equal(manualGeminiFast.providers[0].id, "gemini-fast");
 assert.equal(manualGeminiFast.providers[1].id, "ollama");
@@ -60,17 +61,24 @@ assert.equal(route({ prompt: "problem15.dart нужно исправить" }).p
 assert.equal(route({ prompt: "ответь локально" }).providers[0].id, "ollama");
 
 const cooled = {
-  "gemini-fast": {
+  cerebras: {
     status: "Rate limited",
     lastError: "429",
     cooldownUntil: Date.now() + 60000
   }
 };
-assert.equal(route({ prompt: "Explain maps", providerState: cooled }).providers[0].id, "gemini");
+assert.equal(route({ prompt: "Explain maps", providerState: cooled }).providers[0].id, "groq");
+assert.ok(!route({ prompt: "Compare maps", autoMode: "compare" }).providers.some((provider) => provider.id === "gemini-fast" || provider.id === "gemini"));
 
 assert.equal(_test.isQuotaOrRateLimitError("Provider rate limit reached"), true);
 assert.equal(_test.normalizeOllamaApiModel("ollama/gemma3:4b"), "gemma3:4b");
 assert.equal(_test.normalizeOllamaApiModel("qwen2.5-coder:3b"), "qwen2.5-coder:3b");
+assert.equal(_test.getGatewayProviderTestId("gemini-fast"), "gemini");
+assert.equal(_test.getGatewayProviderTestId("openrouter"), "open_router");
+assert.equal(_test.getGatewayProviderTestId("ollama"), "");
+assert.equal(_test.normalizeGatewayModelName("gemini/models/gemini-2.0-flash"), "models/gemini-2.0-flash");
+assert.equal(_test.normalizeGatewayModelName("groq/llama-3.1-8b-instant"), "llama-3.1-8b-instant");
+assert.equal(_test.getAutoChatProviders(catalog).some((provider) => provider.id === "gemini-fast"), false);
 
 const brokenOllamaError = _test.formatOllamaError(JSON.stringify({
   error: "llama-server process has terminated: exit status 1: error loading model: llama_model_loader: failed to load model from C:\\Users\\\ufffd\ufffd\ufffd\ufffd\ufffd\\.ollama\\models\\blobs\\sha256-4a188102020e9c9530b687fd6400f775c45e90a0d7baafe65bd0a36963fbb7ba"

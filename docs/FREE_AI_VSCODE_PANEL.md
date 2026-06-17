@@ -69,8 +69,9 @@ Auto
 
 ```text
 normal requests -> Cerebras
+compare -> Cerebras / Groq / OpenRouter
 offline / private / local -> Ollama
 default -> Cerebras
 ```
 
-Gemini, Groq, and OpenRouter are still available as manual choices, but Auto avoids them because their gateway/tool behavior is less stable.
+Gemini and Gemini Fast are still available as manual choices, but Auto avoids them to preserve their small free quota. Groq and OpenRouter remain Auto fallbacks.

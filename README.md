@@ -194,18 +194,18 @@ Inside the console:
 
 ## Auto Router
 
-Auto mode is local-first and quota-aware:
+Auto mode is quota-aware and keeps Gemini out of automatic routing:
 
 ```text
-balanced simple requests -> one cheap cloud provider, then Ollama fallback
-compare mode -> several cloud providers
+balanced simple requests -> Cerebras/Groq/OpenRouter candidate, then Ollama fallback
+compare mode -> several non-Gemini cloud providers
 project / file editing / codebase review requests -> OpenCode Agent
 gemma -> Gemma Local
 offline / local / private / ollama -> Ollama
 survival mode -> Gemma Local first
 ```
 
-If a provider returns quota/rate-limit errors, Free AI Console puts it in cooldown and avoids it temporarily. The gateway has one active model at a time, so compare mode runs providers sequentially.
+Gemini and Gemini Fast remain available as manual choices, but Auto avoids them to preserve their small free quota. If a provider returns quota/rate-limit errors, Free AI Console puts it in cooldown and avoids it temporarily. The gateway has one active model at a time, so compare mode runs providers sequentially.
 
 OpenCode Agent is available as a separate provider and is also selected automatically for requests that ask to check the project, edit files, fix code, or refactor. If OpenCode's cloud/gateway model is rate-limited, it can retry through local Ollama.
 
@@ -220,6 +220,8 @@ Free AI: Open Provider Status
 ```
 
 The refresh command stores discovered model candidates locally in VS Code extension storage. Candidates are not enabled automatically.
+
+The provider test command uses gateway admin provider checks for cloud providers instead of sending a generated chat response, so it is much less likely to burn Gemini/Groq/Cerebras quota.
 
 Local provider calls use the Ollama HTTP API and stop after `freeAiConsole.requestTimeoutSeconds` (120 seconds by default). They do not silently pull missing models. If Gemma is installed in `C:\OllamaModels` but the active server does not list it, restart Ollama with:
 

@@ -32,13 +32,14 @@ Gemma Local
 Use this order for the current setup:
 
 ```text
-1. Gemini Fast - cheap default for simple chat
-2. Cerebras    - strong fallback for normal chat
-3. Groq        - fast fallback, but token-per-minute limits can hit quickly
-4. OpenRouter  - useful free-model fallback, but daily free requests are limited
-5. Gemma Local - compact local model through Ollama, no API quota
-6. Ollama      - local coder fallback, no API quota
-7. OpenCode    - project/file agent mode, with Ollama fallback when cloud is rate-limited
+1. Cerebras    - default Auto cloud provider for normal chat
+2. Groq        - fast Auto fallback, but token-per-minute limits can hit quickly
+3. OpenRouter  - useful free-model Auto fallback, but daily free requests are limited
+4. Gemini Fast - manual only; avoid Auto to preserve the small free quota
+5. Gemini      - manual only; avoid Auto to preserve the small free quota
+6. Gemma Local - compact local model through Ollama, no API quota
+7. Ollama      - local coder fallback, no API quota
+8. OpenCode    - project/file agent mode, with Ollama fallback when cloud is rate-limited
 ```
 
 ## Switch Active Gateway Model
@@ -72,7 +73,7 @@ Custom model:
 .\\scripts\\Test-GatewayProviders.ps1
 ```
 
-This prints provider status and model names, but does not print API keys.
+This prints provider status and model names, but does not print API keys. In the VS Code extension, provider tests use gateway admin provider checks for cloud providers instead of generated chat responses, so testing is less likely to spend Gemini/Groq/Cerebras quota.
 
 ## Suggested Usage
 

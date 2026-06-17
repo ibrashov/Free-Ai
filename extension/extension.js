@@ -472,17 +472,7 @@ class FreeAiViewProvider {
     for (const provider of catalog) {
       this.post({ type: "status", text: `Testing ${provider.label} (max 60s)...` });
       try {
-        const answer = provider.id === OPENCODE_PROVIDER
-          ? await askOpenCode({
-            command: config.openCodeCommand,
-            model: config.openCodeModel,
-            localModel: config.localCoderModel,
-            authToken: config.authToken,
-            prompt: "Reply with exactly OK.",
-            fallbackToOllama: config.openCodeFallbackToOllama,
-            timeoutMs: testConfig.requestTimeoutMs
-          })
-          : await askFreeProvider(testConfig, provider, "Reply with exactly OK.", 40);
+        const answer = await testProviderAvailability(testConfig, provider);
         await this.markProviderReady(provider.id);
         results.push(`${provider.label}: OK${answer ? ` - ${String(answer).slice(0, 80)}` : ""}`);
       } catch (error) {
@@ -1595,6 +1585,86 @@ async function applyGatewayModel(gatewayUrl, model, timeoutMs = DISCOVERY_TIMEOU
   }
 }
 
+async function testProviderAvailability(config, provider) {
+  const selectedModel = provider.id === "ollama"
+    ? (config.localCoderModel || provider.model)
+    : provider.model;
+
+  if (String(selectedModel || "").startsWith("ollama/")) {
+    const answer = await askOllamaDirect(
+      config.ollamaUrl || DEFAULT_OLLAMA_URL,
+      selectedModel,
+      "Reply with exactly OK.",
+      4,
+      config.requestTimeoutMs || DEFAULT_REQUEST_TIMEOUT_MS
+    );
+    return answer || "local model responded";
+  }
+
+  if (provider.id === OPENCODE_PROVIDER) {
+    return `${normalizeOpenCodeCommand(config.openCodeCommand)} configured; chat smoke test skipped to avoid quota`;
+  }
+
+  const gatewayProviderId = getGatewayProviderTestId(provider);
+  if (gatewayProviderId) {
+    return testGatewayProviderAvailability(config, gatewayProviderId, provider);
+  }
+
+  return askFreeProvider(config, provider, "Reply with exactly OK.", 40);
+}
+
+function getGatewayProviderTestId(providerOrId) {
+  const id = typeof providerOrId === "string" ? providerOrId : providerOrId?.id;
+  const map = {
+    openrouter: "open_router",
+    "gemini-fast": "gemini",
+    gemini: "gemini",
+    groq: "groq",
+    cerebras: "cerebras"
+  };
+  return map[id] || "";
+}
+
+async function testGatewayProviderAvailability(config, gatewayProviderId, provider) {
+  const response = await fetchWithTimeout(
+    `${config.gatewayUrl}/admin/api/providers/${gatewayProviderId}/test`,
+    { method: "POST" },
+    config.requestTimeoutMs || PROVIDER_TEST_TIMEOUT_MS
+  );
+
+  const raw = await response.text();
+  let result = {};
+  try {
+    result = raw ? JSON.parse(raw) : {};
+  } catch {
+    result = { raw };
+  }
+
+  if (!response.ok || result.ok === false) {
+    throw new Error(result.error_type || result.error || raw || `Provider test failed: HTTP ${response.status}`);
+  }
+
+  const models = Array.isArray(result.models) ? result.models.map(String) : [];
+  if (models.length === 0) {
+    return "provider reachable; no model list returned";
+  }
+
+  const expected = normalizeGatewayModelName(provider.model);
+  const modelVisible = !expected || models.some((model) => normalizeGatewayModelName(model) === expected);
+  if (!modelVisible) {
+    throw new Error(`Provider reachable, but configured model "${provider.model}" was not listed`);
+  }
+
+  return `${models.length} model(s), configured model visible`;
+}
+
+function normalizeGatewayModelName(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^(open_router|gemini|groq|cerebras)\//i, "")
+    .toLowerCase();
+}
+
 async function askFreeProvider(config, provider, prompt, maxTokens = 1400) {
   const selectedModel = provider.id === "ollama"
     ? (config.localCoderModel || provider.model)
@@ -1759,7 +1829,7 @@ function selectProviders(prompt, requestedProvider) {
     return ["ollama", "cerebras"];
   }
 
-  return providerCatalog.filter((provider) => provider.role === "chat").sort((a, b) => a.priority - b.priority).map((provider) => provider.id);
+  return getAutoChatProviders(providerCatalog).map((provider) => provider.id);
 }
 
 function shouldUseOpenCodeAgent(lowerPrompt) {
@@ -1821,7 +1891,7 @@ function selectRoute(options) {
   }
 
   if (autoMode === "compare") {
-    const compareProviders = firstReadyProviders(enabled.filter((provider) => provider.role === "chat"), providerState, 4);
+    const compareProviders = firstReadyProviders(getAutoChatProviders(enabled), providerState, 4);
     if (localProvider && compareProviders.length === 0) {
       compareProviders.push(localProvider);
     }
@@ -1842,7 +1912,7 @@ function selectRoute(options) {
     };
   }
 
-  const primary = firstReadyProviders(enabled.filter((provider) => provider.role === "chat"), providerState, 1);
+  const primary = firstReadyProviders(getAutoChatProviders(enabled), providerState, 1);
   const providers = primary.length > 0 ? primary : [];
   if (localProvider && !providers.some((provider) => provider.id === localProvider.id)) {
     providers.push(localProvider);
@@ -1896,6 +1966,12 @@ function getPreferredLocalProvider(providers) {
   return localProviders.find((provider) => provider.id === "ollama")
     || localProviders.find((provider) => normalizeOllamaApiModel(provider.model) === normalizeOllamaApiModel(DEFAULT_LOCAL_CODER_MODEL))
     || localProviders.sort((a, b) => a.priority - b.priority)[0];
+}
+
+function getAutoChatProviders(providers) {
+  return providers
+    .filter((provider) => provider.role === "chat" && provider.autoEnabled !== false)
+    .sort((a, b) => a.priority - b.priority);
 }
 
 function firstReadyProviders(providers, providerState, count) {
@@ -2437,11 +2513,15 @@ module.exports = {
     fetchWithTimeout,
     formatFetchFailure,
     formatOllamaError,
+    getAutoChatProviders,
+    getGatewayProviderTestId,
     getProviderRuntimeState,
     isQuotaOrRateLimitError,
+    normalizeGatewayModelName,
     normalizeOllamaApiModel,
     normalizeChatStore,
     normalizeProviderState,
-    selectRoute
+    selectRoute,
+    testProviderAvailability
   }
 };
