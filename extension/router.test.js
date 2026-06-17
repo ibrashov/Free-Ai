@@ -72,6 +72,37 @@ assert.equal(_test.isQuotaOrRateLimitError("Provider rate limit reached"), true)
 assert.equal(_test.normalizeOllamaApiModel("ollama/gemma3:4b"), "gemma3:4b");
 assert.equal(_test.normalizeOllamaApiModel("qwen2.5-coder:3b"), "qwen2.5-coder:3b");
 
+const brokenOllamaError = _test.formatOllamaError(JSON.stringify({
+  error: "llama-server process has terminated: exit status 1: error loading model: llama_model_loader: failed to load model from C:\\Users\\\ufffd\ufffd\ufffd\ufffd\ufffd\\.ollama\\models\\blobs\\sha256-4a188102020e9c9530b687fd6400f775c45e90a0d7baafe65bd0a36963fbb7ba"
+}), "qwen2.5-coder:3b", 500);
+assert.match(brokenOllamaError, /failed to load from its model storage/);
+assert.match(brokenOllamaError, /Repair-OllamaLocalModels\.ps1 -Model qwen2\.5-coder:3b/);
+assert.doesNotMatch(brokenOllamaError, /sha256-4a188102020e9c9530b687fd6400f775c45e90a0d7baafe65bd0a36963fbb7ba/);
+
+const missingOllamaError = _test.formatOllamaError("model 'qwen2.5-coder:3b' not found, try pulling it first", "qwen2.5-coder:3b", 404);
+assert.match(missingOllamaError, /not visible to the active server/);
+
+const gatewayFetchError = _test.formatFetchFailure("http://127.0.0.1:8082/v1/messages", new Error("fetch failed"));
+assert.match(gatewayFetchError, /free-claude-code gateway/);
+assert.match(gatewayFetchError, /fcc-server/);
+
+const ollamaFetchError = _test.formatFetchFailure("http://127.0.0.1:11434/api/chat", new Error("fetch failed"));
+assert.match(ollamaFetchError, /local Ollama/);
+
+const brokenLocalState = _test.getProviderRuntimeState(
+  { id: "ollama", role: "local-fallback" },
+  {
+    ollama: {
+      status: "Cooling down",
+      lastError: "Ollama model failed",
+      cooldownUntil: Date.now() + 60000
+    }
+  }
+);
+assert.equal(brokenLocalState.status, "Cooling down");
+assert.equal(brokenLocalState.lastError, "Ollama model failed");
+assert.equal(_test.getProviderRuntimeState({ id: "ollama", role: "local-fallback" }, {}).status, "Local");
+
 const firstChat = _test.createChatRecord("New chat", [
   { role: "user", text: "My name is Anuar", timestamp: "2026-06-15T10:00:00.000Z" },
   { role: "assistant", text: "Nice to meet you", timestamp: "2026-06-15T10:00:01.000Z" },

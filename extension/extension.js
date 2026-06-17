@@ -1653,14 +1653,7 @@ async function askOllamaDirect(
 
   if (!response.ok) {
     const text = await response.text();
-    if (response.status === 404 || /model.+not found|pull model/i.test(text)) {
-      throw new Error(
-        `Ollama model "${apiModel}" is not visible to the active server. `
-        + `Restart Ollama with OLLAMA_MODELS=C:\\OllamaModels, for example: `
-        + `.\\scripts\\Repair-OllamaLocalModels.ps1 -Model ${apiModel}`
-      );
-    }
-    throw new Error(text || `Ollama request failed: HTTP ${response.status}`);
+    throw new Error(formatOllamaError(text, apiModel, response.status));
   }
 
   const json = await response.json();
@@ -1992,6 +1985,14 @@ function normalizeProviderState(value) {
 
 function getProviderRuntimeState(provider, providerState) {
   if (provider.role === "local-fallback") {
+    const state = providerState[provider.id] || {};
+    if (state.lastError && Number(state.cooldownUntil || 0) > Date.now()) {
+      return {
+        status: state.status || "Local failed",
+        lastError: state.lastError,
+        cooldownUntil: Number(state.cooldownUntil || 0)
+      };
+    }
     return {
       status: "Local",
       lastError: "",
@@ -2219,6 +2220,89 @@ function normalizeOllamaApiModel(model) {
   return value.startsWith("ollama/") ? value.slice("ollama/".length) : value;
 }
 
+function extractErrorText(raw) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed.error === "string") {
+      return parsed.error.trim();
+    }
+    if (parsed && typeof parsed.message === "string") {
+      return parsed.message.trim();
+    }
+  } catch {
+    // Some providers return plain text, not JSON.
+  }
+  return text;
+}
+
+function compactErrorDetail(value, maxLength = 360) {
+  const compact = String(value || "")
+    .replace(/C:\\Users\\[^\\]+\\.ollama\\models\\blobs\\sha256-[a-f0-9]+/gi, "old Windows user-profile Ollama blob path")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+  return `${compact.slice(0, maxLength - 3).trim()}...`;
+}
+
+function isOllamaStorageLoadError(value) {
+  const text = String(value || "");
+  return /llama-server process has terminated|llama_model_loader|failed to load model/i.test(text)
+    && /\\.ollama\\models\\blobs|old Windows user-profile Ollama blob path|\ufffd/i.test(text);
+}
+
+function formatOllamaError(raw, apiModel, status) {
+  const text = extractErrorText(raw);
+  if (isOllamaStorageLoadError(text)) {
+    return [
+      `Ollama model "${apiModel}" failed to load from its model storage.`,
+      "The active Ollama server is probably still using a broken Windows user-profile model path instead of C:\\OllamaModels.",
+      `Run .\\scripts\\Repair-OllamaLocalModels.ps1 -Model ${apiModel}, then reload VS Code.`,
+      `Detail: ${compactErrorDetail(text)}`
+    ].join(" ");
+  }
+
+  if (status === 404 || /model.+not found|pull model/i.test(text)) {
+    return [
+      `Ollama model "${apiModel}" is not visible to the active server.`,
+      "Restart Ollama with OLLAMA_MODELS=C:\\OllamaModels.",
+      `Run .\\scripts\\Repair-OllamaLocalModels.ps1 -Model ${apiModel}.`
+    ].join(" ");
+  }
+
+  return text || `Ollama request failed: HTTP ${status}`;
+}
+
+function getOrigin(value) {
+  try {
+    return new URL(String(value)).origin;
+  } catch {
+    return String(value || "");
+  }
+}
+
+function formatFetchFailure(url, error) {
+  const message = getErrorMessage(error);
+  const code = error?.cause?.code || error?.code || "";
+  const suffix = code ? code : message;
+  const origin = getOrigin(url);
+
+  if (/^https?:\/\/(127\.0\.0\.1|localhost):8082\b/i.test(String(url))) {
+    return `Could not reach the local free-claude-code gateway at ${origin}. Start it with fcc-server, then retry. (${suffix})`;
+  }
+
+  if (/^https?:\/\/(127\.0\.0\.1|localhost):11434\b/i.test(String(url))) {
+    return `Could not reach local Ollama at ${origin}. Start Ollama, then retry. (${suffix})`;
+  }
+
+  return `Network request failed for ${url}: ${message}`;
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
   const duration = Math.max(1000, Number(timeoutMs) || DEFAULT_REQUEST_TIMEOUT_MS);
@@ -2233,7 +2317,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_REQUEST_T
     if (error && error.name === "AbortError") {
       throw new Error(`Request timed out after ${Math.round(duration / 1000)}s: ${url}`);
     }
-    throw error;
+    throw new Error(formatFetchFailure(url, error));
   } finally {
     clearTimeout(timer);
   }
@@ -2351,6 +2435,9 @@ module.exports = {
     createChatRecord,
     createChatTitle,
     fetchWithTimeout,
+    formatFetchFailure,
+    formatOllamaError,
+    getProviderRuntimeState,
     isQuotaOrRateLimitError,
     normalizeOllamaApiModel,
     normalizeChatStore,

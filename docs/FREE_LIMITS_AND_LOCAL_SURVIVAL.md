@@ -28,7 +28,7 @@ Cerebras gpt-oss-120b free trial
 - 1M TPH
 - 1M TPD
 
-Groq qwen/qwen3-32b free
+Groq llama-3.1-8b-instant free
 - 60 RPM
 - 1K RPD
 - 6K TPM

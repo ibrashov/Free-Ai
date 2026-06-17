@@ -45,7 +45,7 @@ if (-not [string]::IsNullOrWhiteSpace($SelectedProvider)) {
         "openrouter"  = "open_router/google/gemma-4-31b-it:free"
         "gemini"      = "gemini/models/gemini-2.5-flash"
         "gemini-fast" = "gemini/models/gemini-2.0-flash"
-        "groq"        = "groq/qwen/qwen3-32b"
+        "groq"        = "groq/llama-3.1-8b-instant"
         "cerebras"    = "cerebras/gpt-oss-120b"
         "ollama"      = "ollama/qwen2.5-coder:3b"
         "gemma"       = "ollama/gemma3:4b"

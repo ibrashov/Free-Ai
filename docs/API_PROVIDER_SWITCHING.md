@@ -63,7 +63,7 @@ Other options:
 Custom model:
 
 ```powershell
-.\\scripts\\Set-GatewayModel.ps1 -Provider custom -Model "groq/qwen/qwen3-32b"
+.\\scripts\\Set-GatewayModel.ps1 -Provider custom -Model "groq/llama-3.1-8b-instant"
 ```
 
 ## Test Providers
