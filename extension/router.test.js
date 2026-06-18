@@ -2,6 +2,10 @@ const assert = require("assert");
 const Module = require("module");
 const vm = require("vm");
 
+const vscodeWindow = {
+  showWarningMessage: async () => undefined
+};
+
 const originalLoad = Module._load;
 Module._load = function patchedLoad(request, parent, isMain) {
   if (request === "vscode") {
@@ -15,7 +19,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
       Uri: {
         joinPath: () => ({})
       },
-      window: {}
+      window: vscodeWindow
     };
   }
   return originalLoad(request, parent, isMain);
@@ -172,6 +176,7 @@ const viewProvider = new _test.FreeAiViewProvider({}, {
 viewProvider.chats = [firstChat];
 viewProvider.activeChatId = firstChat.id;
 const html = viewProvider.getHtml({});
+assert.equal(html.includes('id="delete-active-chat"'), false);
 const scriptMatch = html.match(/<script nonce="[^"]+">([\s\S]*?)<\/script>/);
 assert.ok(scriptMatch, "webview script should be present");
 new vm.Script(scriptMatch[1]);
@@ -196,9 +201,6 @@ function createWebviewHarness(script) {
       addEventListener(type, listener) {
         windowListeners[type] = windowListeners[type] || [];
         windowListeners[type].push(listener);
-      },
-      confirm() {
-        return true;
       }
     },
     acquireVsCodeApi: () => ({
@@ -248,7 +250,6 @@ function createMockDocument() {
     "attached-files",
     "toggle-chats",
     "new-chat",
-    "delete-active-chat",
     "chat-panel",
     "chat-list",
     "active-chat-title",
@@ -494,14 +495,61 @@ const deleteButton = findElement(
   (element) => hasClass(element, "chat-delete")
 );
 assert.ok(deleteButton, "chat delete button should be rendered");
-deleteButton.dispatchEvent("click");
+const deleteClickEvent = deleteButton.dispatchEvent("click");
+assert.equal(deleteClickEvent.defaultPrevented, true);
+assert.equal(deleteClickEvent.propagationStopped, true);
 assert.equal(webview.messages.length, 8);
 assert.equal(webview.messages[7].type, "deleteChat");
 assert.equal(webview.messages[7].chatId, firstChat.id);
+assert.equal(webview.document.getElementById("delete-active-chat"), null);
 
-webview.document.getElementById("delete-active-chat").dispatchEvent("click");
-assert.equal(webview.messages.length, 9);
-assert.equal(webview.messages[8].type, "deleteChat");
-assert.equal(webview.messages[8].chatId, firstChat.id);
+(async () => {
+  const confirmFirstChat = _test.createChatRecord("Confirm delete", []);
+  const confirmSecondChat = _test.createChatRecord("Keep chat", []);
+  const requestDeleteProvider = new _test.FreeAiViewProvider({}, {
+    globalStorageUri: {},
+    globalState: {
+      get: (_key, fallback) => fallback,
+      update: async () => {}
+    }
+  });
+  let requestSaveQueued = false;
+  const requestPosts = [];
+  requestDeleteProvider.queueSaveChats = () => {
+    requestSaveQueued = true;
+  };
+  requestDeleteProvider.post = (message) => {
+    requestPosts.push(message);
+  };
+  requestDeleteProvider.view = {};
+  requestDeleteProvider.chats = [confirmFirstChat, confirmSecondChat];
+  requestDeleteProvider.activeChatId = confirmFirstChat.id;
 
-console.log("router tests ok");
+  const warningCalls = [];
+  vscodeWindow.showWarningMessage = async (...args) => {
+    warningCalls.push(args);
+    return undefined;
+  };
+  await requestDeleteProvider.requestDeleteChat(confirmFirstChat.id);
+  assert.equal(requestDeleteProvider.chats.some((chat) => chat.id === confirmFirstChat.id), true);
+  assert.equal(requestSaveQueued, false);
+  assert.equal(requestPosts.length, 0);
+  assert.equal(warningCalls.length, 1);
+  assert.match(warningCalls[0][0], /Confirm delete/);
+  assert.equal(warningCalls[0][2], "Delete");
+
+  vscodeWindow.showWarningMessage = async (...args) => {
+    warningCalls.push(args);
+    return "Delete";
+  };
+  await requestDeleteProvider.requestDeleteChat(confirmFirstChat.id);
+  assert.equal(requestDeleteProvider.chats.some((chat) => chat.id === confirmFirstChat.id), false);
+  assert.equal(requestDeleteProvider.activeChatId, confirmSecondChat.id);
+  assert.equal(requestSaveQueued, true);
+  assert.equal(requestPosts[0].type, "chatState");
+
+  console.log("router tests ok");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

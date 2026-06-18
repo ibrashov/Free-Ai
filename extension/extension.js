@@ -193,6 +193,26 @@ class FreeAiViewProvider {
     this.postChatState();
   }
 
+  async requestDeleteChat(chatId) {
+    const id = String(chatId || "");
+    const chat = this.chats.find((item) => item.id === id);
+    if (!chat) {
+      return;
+    }
+
+    const title = chat.title || "New chat";
+    const choice = await vscode.window.showWarningMessage(
+      `Delete this chat permanently?\n\n${title}`,
+      { modal: true },
+      "Delete"
+    );
+    if (choice !== "Delete") {
+      return;
+    }
+
+    this.deleteChat(id);
+  }
+
   addToHistory(role, text, chatId = this.activeChatId, activate = true) {
     const chat = this.ensureChat(chatId, activate);
     const timestamp = new Date().toISOString();
@@ -253,7 +273,7 @@ class FreeAiViewProvider {
         this.selectChat(message.chatId);
       }
       if (message.type === "deleteChat") {
-        this.deleteChat(message.chatId);
+        await this.requestDeleteChat(message.chatId);
       }
       if (message.type === "pickFiles") {
         await this.pickFilesForPrompt();
@@ -735,7 +755,7 @@ class FreeAiViewProvider {
     }
     .chat-header {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      grid-template-columns: auto minmax(0, 1fr) auto;
       align-items: center;
       gap: 8px;
       margin-bottom: 10px;
@@ -973,7 +993,6 @@ class FreeAiViewProvider {
   <div class="chat-header">
     <button id="toggle-chats" title="Open chat history">Chats</button>
     <div id="active-chat-title" class="chat-title">New chat</div>
-    <button id="delete-active-chat" title="Delete active chat permanently">Delete</button>
     <button id="new-chat" title="Start a new chat">New chat</button>
   </div>
   <div id="chat-panel" class="chat-panel">
@@ -1021,7 +1040,6 @@ class FreeAiViewProvider {
     const attachedFilesEl = document.getElementById("attached-files");
     const toggleChatsEl = document.getElementById("toggle-chats");
     const newChatEl = document.getElementById("new-chat");
-    const deleteActiveChatEl = document.getElementById("delete-active-chat");
     const chatPanelEl = document.getElementById("chat-panel");
     const chatListEl = document.getElementById("chat-list");
     const activeChatTitleEl = document.getElementById("active-chat-title");
@@ -1041,9 +1059,6 @@ class FreeAiViewProvider {
     newChatEl.addEventListener("click", () => {
       chatPanelEl.classList.remove("visible");
       vscode.postMessage({ type: "newChat" });
-    });
-    deleteActiveChatEl.addEventListener("click", () => {
-      confirmDeleteChat(getActiveChat());
     });
     addFileEl.addEventListener("click", () => {
       vscode.postMessage({ type: "pickFiles" });
@@ -1250,18 +1265,13 @@ class FreeAiViewProvider {
       renderChatList();
       const chat = getActiveChat();
       activeChatTitleEl.textContent = chat ? chat.title : "New chat";
-      deleteActiveChatEl.disabled = !chat;
       if (renderMessages) {
         renderActiveChat();
       }
     }
 
-    function confirmDeleteChat(chat) {
+    function requestDeleteChat(chat) {
       if (!chat) return;
-      const titleText = chat.title || "New chat";
-      if (!window.confirm("Delete this chat permanently?\\n\\n" + titleText)) {
-        return;
-      }
       vscode.postMessage({ type: "deleteChat", chatId: chat.id });
     }
 
@@ -1301,7 +1311,7 @@ class FreeAiViewProvider {
         deleteButton.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
-          confirmDeleteChat(chat);
+          requestDeleteChat(chat);
         });
 
         row.appendChild(item);
