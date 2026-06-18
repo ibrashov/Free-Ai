@@ -1,6 +1,6 @@
 const vscode = require("vscode");
 const path = require("path");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
 const providerCatalog = require("./provider-catalog.json");
 
@@ -10,8 +10,12 @@ const OPENCODE_PROVIDER = "opencode";
 const OPENCODE_MODEL = "anthropic/claude-sonnet-4-0";
 const DEFAULT_LOCAL_CODER_MODEL = "ollama/qwen2.5-coder:3b";
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
+const DEFAULT_GATEWAY_URL = "http://127.0.0.1:8082";
+const DEFAULT_GATEWAY_COMMAND = "fcc-server";
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
 const DISCOVERY_TIMEOUT_MS = 15000;
+const GATEWAY_HEALTH_TIMEOUT_MS = 2500;
+const GATEWAY_STARTUP_TIMEOUT_MS = 20000;
 const PROVIDER_TEST_TIMEOUT_MS = 60000;
 const PROVIDER_STATE_KEY = "freeAi.providerState";
 const DISCOVERY_FILE = "provider-candidates.json";
@@ -40,6 +44,12 @@ function activate(context) {
     }),
     vscode.commands.registerCommand("freeAiConsole.openProviderStatus", async () => {
       await provider.openProviderStatus();
+    }),
+    vscode.commands.registerCommand("freeAiConsole.startGateway", async () => {
+      await provider.startGatewayFromCommand();
+    }),
+    vscode.commands.registerCommand("freeAiConsole.checkGateway", async () => {
+      await provider.checkGateway({ showMessage: true });
     })
   );
 }
@@ -57,6 +67,12 @@ class FreeAiViewProvider {
     this.pendingEdits = new Map();
     this.providerState = normalizeProviderState(this.context.globalState.get(PROVIDER_STATE_KEY, {}));
     this.discoveryUri = vscode.Uri.joinPath(this.context.globalStorageUri, DISCOVERY_FILE);
+    this.gatewayStatus = {
+      state: "unknown",
+      text: "Gateway: not checked",
+      detail: ""
+    };
+    this.gatewayStartPromise = null;
   }
 
   async loadChats() {
@@ -290,15 +306,25 @@ class FreeAiViewProvider {
       if (message.type === "showProviderStatus") {
         await this.openProviderStatus();
       }
+      if (message.type === "checkGateway") {
+        await this.checkGateway({ showMessage: false });
+      }
+      if (message.type === "startGateway") {
+        await this.ensureGatewayRunning({ force: true, showMessage: false });
+      }
     });
 
     this.loadChats().then(() => {
       webviewView.webview.html = this.getHtml(webviewView.webview);
+      this.postGatewayStatus();
+      this.ensureGatewayRunning({ force: false, showMessage: false });
     }).catch((error) => {
       const chat = createChatRecord();
       this.chats = [chat];
       this.activeChatId = chat.id;
       webviewView.webview.html = this.getHtml(webviewView.webview);
+      this.postGatewayStatus();
+      this.ensureGatewayRunning({ force: false, showMessage: false });
       this.post({ type: "error", text: `Could not load chat database: ${getErrorMessage(error)}` });
     });
   }
@@ -354,6 +380,12 @@ class FreeAiViewProvider {
         reason: route.reason,
         providers: route.providers.map((item) => item.label)
       });
+      if (route.providers.some((item) => providerUsesGateway(item, config))) {
+        const gateway = await this.ensureGatewayRunning({ force: false, showMessage: false });
+        if (gateway.state !== "ready") {
+          throw new Error(`${gateway.text}${gateway.detail ? `: ${gateway.detail}` : ""}`);
+        }
+      }
 
       for (const selectedProvider of route.providers) {
         this.post({ type: "status", text: `${route.mode}: ${selectedProvider.label} (${route.reason})...` });
@@ -418,11 +450,121 @@ class FreeAiViewProvider {
     this.view.webview.postMessage(message);
   }
 
+  setGatewayStatus(state, text, detail = "") {
+    this.gatewayStatus = {
+      state,
+      text,
+      detail
+    };
+    this.postGatewayStatus();
+    return this.gatewayStatus;
+  }
+
+  postGatewayStatus() {
+    if (!this.view) {
+      return;
+    }
+    this.post({
+      type: "gatewayStatus",
+      status: this.gatewayStatus
+    });
+  }
+
+  async checkGateway(options = {}) {
+    const { showMessage = false } = options;
+    const config = this.getConfig();
+    this.setGatewayStatus("checking", `Gateway: checking ${config.gatewayUrl}...`);
+
+    const health = await getGatewayHealth(config.gatewayUrl);
+    if (health.ok) {
+      const status = this.setGatewayStatus("ready", `Gateway: running at ${config.gatewayUrl}`);
+      if (showMessage) {
+        vscode.window.showInformationMessage(status.text);
+      }
+      return status;
+    }
+
+    const status = this.setGatewayStatus("stopped", `Gateway: not running at ${config.gatewayUrl}`, health.error);
+    if (showMessage) {
+      vscode.window.showWarningMessage(`${status.text}. ${status.detail}`);
+    }
+    return status;
+  }
+
+  async startGatewayFromCommand() {
+    return this.ensureGatewayRunning({ force: true, showMessage: true });
+  }
+
+  async ensureGatewayRunning(options = {}) {
+    const { force = false, showMessage = false } = options;
+    const config = this.getConfig();
+
+    const existing = await getGatewayHealth(config.gatewayUrl);
+    if (existing.ok) {
+      const status = this.setGatewayStatus("ready", `Gateway: running at ${config.gatewayUrl}`);
+      if (showMessage) {
+        vscode.window.showInformationMessage(status.text);
+      }
+      return status;
+    }
+
+    if (!force && !config.autoStartGateway) {
+      return this.setGatewayStatus(
+        "disabled",
+        "Gateway: auto-start is off",
+        `Enable freeAiConsole.autoStartGateway or start ${config.gatewayCommand || DEFAULT_GATEWAY_COMMAND}.`
+      );
+    }
+
+    if (this.gatewayStartPromise) {
+      return this.gatewayStartPromise;
+    }
+
+    this.gatewayStartPromise = this.startGatewayProcess(config, showMessage)
+      .finally(() => {
+        this.gatewayStartPromise = null;
+      });
+
+    return this.gatewayStartPromise;
+  }
+
+  async startGatewayProcess(config, showMessage) {
+    const commandLine = config.gatewayCommand || DEFAULT_GATEWAY_COMMAND;
+    this.setGatewayStatus("starting", `Gateway: starting with ${commandLine}...`);
+
+    try {
+      await spawnDetachedProcess(commandLine);
+      const health = await waitForGatewayHealth(config.gatewayUrl, config.gatewayStartupTimeoutMs);
+      if (!health.ok) {
+        throw new Error(health.error || `Gateway did not become healthy within ${Math.round(config.gatewayStartupTimeoutMs / 1000)}s.`);
+      }
+
+      const status = this.setGatewayStatus("ready", `Gateway: running at ${config.gatewayUrl}`);
+      if (showMessage) {
+        vscode.window.showInformationMessage(status.text);
+      }
+      return status;
+    } catch (error) {
+      const message = getErrorMessage(error);
+      const status = this.setGatewayStatus("error", "Gateway: could not start", message);
+      if (showMessage) {
+        vscode.window.showErrorMessage(`${status.text}. ${status.detail}`);
+      }
+      return status;
+    }
+  }
+
   getConfig() {
     const config = vscode.workspace.getConfiguration("freeAiConsole");
     return {
-      gatewayUrl: config.get("gatewayUrl", "http://127.0.0.1:8082").replace(/\/$/, ""),
+      gatewayUrl: config.get("gatewayUrl", DEFAULT_GATEWAY_URL).replace(/\/$/, ""),
       authToken: config.get("authToken", "freecc"),
+      autoStartGateway: config.get("autoStartGateway", true),
+      gatewayCommand: config.get("gatewayCommand", DEFAULT_GATEWAY_COMMAND),
+      gatewayStartupTimeoutMs: Math.max(
+        3000,
+        Number(config.get("gatewayStartupTimeoutSeconds", GATEWAY_STARTUP_TIMEOUT_MS / 1000)) * 1000
+      ),
       defaultProvider: config.get("defaultProvider", "auto"),
       autoMode: config.get("autoMode", "balanced"),
       freePolicy: config.get("freePolicy", "no-card"),
@@ -515,6 +657,9 @@ class FreeAiViewProvider {
       requestTimeoutMs: Math.min(config.requestTimeoutMs, PROVIDER_TEST_TIMEOUT_MS)
     };
     const catalog = this.getCatalog(config).filter((provider) => provider.enabled);
+    if (catalog.some((provider) => providerUsesGateway(provider, config))) {
+      await this.ensureGatewayRunning({ force: false, showMessage: false });
+    }
     const results = [];
     this.post({ type: "status", text: "Testing Free AI providers..." });
 
@@ -728,6 +873,7 @@ class FreeAiViewProvider {
       .get("defaultProvider", "auto");
     const initialChatState = safeJsonForHtml(this.getChatState());
     const initialProviders = safeJsonForHtml(this.getProviderStatusLines());
+    const initialGatewayStatus = safeJsonForHtml(this.gatewayStatus);
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -904,6 +1050,52 @@ class FreeAiViewProvider {
       background: var(--vscode-editor-background);
       font-size: 12px;
     }
+    .gateway-panel {
+      margin: 0 0 10px 0;
+      padding: 8px;
+      border: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editor-background);
+      font-size: 12px;
+    }
+    .gateway-panel-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .gateway-status {
+      overflow-wrap: anywhere;
+      font-weight: 600;
+    }
+    .gateway-status.ready {
+      color: var(--vscode-charts-green);
+    }
+    .gateway-status.error,
+    .gateway-status.stopped {
+      color: var(--vscode-errorForeground);
+    }
+    .gateway-status.starting,
+    .gateway-status.checking {
+      color: var(--vscode-textLink-foreground);
+    }
+    .gateway-detail {
+      display: none;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+      opacity: 0.72;
+      font-size: 11px;
+    }
+    .gateway-detail.visible {
+      display: block;
+    }
+    .gateway-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .gateway-actions button {
+      padding: 5px 8px;
+      font-size: 12px;
+    }
     .route-line {
       margin-bottom: 6px;
       opacity: 0.9;
@@ -1013,6 +1205,18 @@ class FreeAiViewProvider {
       </select>
     </div>
   </div>
+  <div class="gateway-panel">
+    <div class="gateway-panel-header">
+      <div>
+        <div id="gateway-status" class="gateway-status">Gateway: not checked</div>
+        <div id="gateway-detail" class="gateway-detail"></div>
+      </div>
+      <div class="gateway-actions">
+        <button id="gateway-check" title="Check local gateway health">Check</button>
+        <button id="gateway-start" title="Start fcc-server">Start</button>
+      </div>
+    </div>
+  </div>
   <div class="route-panel">
     <div id="route-line" class="route-line">Mode: Ready</div>
     <div id="provider-list" class="provider-list"></div>
@@ -1048,9 +1252,14 @@ class FreeAiViewProvider {
     const statusProvidersEl = document.getElementById("status-providers");
     const testProvidersEl = document.getElementById("test-providers");
     const refreshModelsEl = document.getElementById("refresh-models");
+    const gatewayStatusEl = document.getElementById("gateway-status");
+    const gatewayDetailEl = document.getElementById("gateway-detail");
+    const gatewayCheckEl = document.getElementById("gateway-check");
+    const gatewayStartEl = document.getElementById("gateway-start");
     let chatState = ${initialChatState};
     let activeChatId = chatState.activeChatId || "";
     let providerStatusEntries = ${initialProviders};
+    let gatewayStatus = ${initialGatewayStatus};
     let attachedFiles = [];
     
     toggleChatsEl.addEventListener("click", () => {
@@ -1071,6 +1280,12 @@ class FreeAiViewProvider {
     });
     refreshModelsEl.addEventListener("click", () => {
       vscode.postMessage({ type: "refreshModels" });
+    });
+    gatewayCheckEl.addEventListener("click", () => {
+      vscode.postMessage({ type: "checkGateway" });
+    });
+    gatewayStartEl.addEventListener("click", () => {
+      vscode.postMessage({ type: "startGateway" });
     });
     sendEl.addEventListener("click", send);
     promptEl.addEventListener("keydown", handlePromptSubmitKey, true);
@@ -1121,10 +1336,15 @@ class FreeAiViewProvider {
         providerStatusEntries = message.providers || providerStatusEntries;
         renderProviderStatus(message.route);
       }
+      if (message.type === "gatewayStatus") {
+        gatewayStatus = message.status || gatewayStatus;
+        renderGatewayStatus(gatewayStatus);
+      }
       
     });
     updateChatState(chatState, true);
     renderProviderStatus();
+    renderGatewayStatus(gatewayStatus);
     
 
     function send() {
@@ -1234,6 +1454,17 @@ class FreeAiViewProvider {
         row.textContent = line;
         providerListEl.appendChild(row);
       });
+    }
+
+    function renderGatewayStatus(status) {
+      const current = status || {};
+      const state = current.state || "unknown";
+      gatewayStatusEl.className = "gateway-status " + state;
+      gatewayStatusEl.textContent = current.text || "Gateway: not checked";
+      gatewayDetailEl.textContent = current.detail || "";
+      gatewayDetailEl.classList.toggle("visible", Boolean(current.detail));
+      gatewayStartEl.disabled = state === "starting" || state === "ready";
+      gatewayCheckEl.disabled = state === "checking" || state === "starting";
     }
 
     function getActiveChat() {
@@ -1651,6 +1882,107 @@ function safeJsonForHtml(value) {
     .replace(/&/g, "\\u0026")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
+}
+
+function splitCommandLine(value) {
+  const tokens = [];
+  const pattern = /"([^"]*)"|'([^']*)'|[^\s]+/g;
+  let match;
+
+  while ((match = pattern.exec(String(value || ""))) !== null) {
+    tokens.push(match[1] ?? match[2] ?? match[0]);
+  }
+
+  return tokens;
+}
+
+function spawnDetachedProcess(commandLine) {
+  const [command, ...args] = splitCommandLine(commandLine);
+  if (!command) {
+    throw new Error("Gateway command is empty.");
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let child;
+
+    try {
+      child = spawn(command, args, {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    child.once("error", (error) => {
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    });
+
+    child.once("spawn", () => {
+      if (!settled) {
+        settled = true;
+        child.unref();
+        resolve();
+      }
+    });
+  });
+}
+
+async function getGatewayHealth(gatewayUrl, timeoutMs = GATEWAY_HEALTH_TIMEOUT_MS) {
+  const url = `${String(gatewayUrl || DEFAULT_GATEWAY_URL).replace(/\/$/, "")}/health`;
+
+  try {
+    const response = await fetchWithTimeout(url, {}, timeoutMs);
+    const raw = await response.text();
+    let status = "";
+    try {
+      const json = raw ? JSON.parse(raw) : {};
+      status = String(json.status || json.ok || "");
+    } catch {
+      status = raw;
+    }
+
+    const healthy = response.ok && (!status || /healthy|ok|true/i.test(status));
+    return {
+      ok: healthy,
+      detail: raw || `HTTP ${response.status}`,
+      error: healthy ? "" : raw || `Gateway health failed: HTTP ${response.status}`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: "",
+      error: getErrorMessage(error)
+    };
+  }
+}
+
+async function waitForGatewayHealth(gatewayUrl, timeoutMs = GATEWAY_STARTUP_TIMEOUT_MS) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || GATEWAY_STARTUP_TIMEOUT_MS);
+  let last = {
+    ok: false,
+    error: "Gateway was not checked."
+  };
+
+  while (Date.now() < deadline) {
+    last = await getGatewayHealth(gatewayUrl);
+    if (last.ok) {
+      return last;
+    }
+    await sleep(500);
+  }
+
+  return last;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function applyGatewayModel(gatewayUrl, model, timeoutMs = DISCOVERY_TIMEOUT_MS) {
@@ -2112,6 +2444,18 @@ function cleanTerminalText(value) {
     .filter((line) => !/^[\s\u2800-\u28ff]+$/.test(line))
     .join("\n")
     .trim();
+}
+
+function providerUsesGateway(provider, config = {}) {
+  if (!provider) {
+    return false;
+  }
+  const model = provider.id === OPENCODE_PROVIDER
+    ? (config.openCodeModel || provider.model)
+    : provider.id === "ollama"
+      ? (config.localCoderModel || provider.model)
+      : provider.model;
+  return !String(model || "").startsWith("ollama/");
 }
 
 function buildProviderCatalog(config) {
@@ -2613,6 +2957,7 @@ module.exports = {
     normalizeOllamaApiModel,
     normalizeChatStore,
     normalizeProviderState,
+    providerUsesGateway,
     selectRoute,
     testProviderAvailability
   }

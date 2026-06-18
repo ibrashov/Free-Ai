@@ -3,7 +3,9 @@ const Module = require("module");
 const vm = require("vm");
 
 const vscodeWindow = {
-  showWarningMessage: async () => undefined
+  showWarningMessage: async () => undefined,
+  showInformationMessage: async () => undefined,
+  showErrorMessage: async () => undefined
 };
 
 const originalLoad = Module._load;
@@ -114,6 +116,9 @@ const brokenLocalState = _test.getProviderRuntimeState(
 assert.equal(brokenLocalState.status, "Cooling down");
 assert.equal(brokenLocalState.lastError, "Ollama model failed");
 assert.equal(_test.getProviderRuntimeState({ id: "ollama", role: "local-fallback" }, {}).status, "Local");
+assert.equal(_test.providerUsesGateway({ id: "cerebras", model: "cerebras/gpt-oss-120b" }, {}), true);
+assert.equal(_test.providerUsesGateway({ id: "gemma", model: "ollama/gemma3:4b" }, {}), false);
+assert.equal(_test.providerUsesGateway({ id: "opencode", model: "anthropic/claude-sonnet-4-0" }, { openCodeModel: "ollama/qwen2.5-coder:3b" }), false);
 
 const firstChat = _test.createChatRecord("New chat", [
   { role: "user", text: "My name is Anuar", timestamp: "2026-06-15T10:00:00.000Z" },
@@ -257,7 +262,11 @@ function createMockDocument() {
     "provider-list",
     "status-providers",
     "test-providers",
-    "refresh-models"
+    "refresh-models",
+    "gateway-status",
+    "gateway-detail",
+    "gateway-check",
+    "gateway-start"
   ];
   const elements = new Map(ids.map((id) => [id, new MockElement("div", id)]));
   const created = [];

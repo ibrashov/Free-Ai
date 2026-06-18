@@ -20,6 +20,8 @@ http://127.0.0.1:8082
 - Adds a separate **Free AI** panel inside VS Code.
 - Lets you choose provider: Auto, OpenCode Agent, Cerebras, Gemini, Groq, OpenRouter, Ollama.
 - Uses quota-aware routing with cooldowns and local Ollama fallback.
+- Starts the local `free-claude-code` gateway automatically when the panel opens.
+- Shows gateway health and manual Start/Check controls inside the Free AI panel.
 - Opens local Odysseus Chat from VS Code with the **Odysseus** button or command.
 - Saves separate local chat sessions and lets you reopen and continue them.
 - Uses `free-claude-code` as a local proxy.
@@ -89,7 +91,7 @@ docs/
 - Windows
 - VS Code
 - PowerShell
-- `free-claude-code` installed and running
+- `free-claude-code` installed and available as `fcc-server`
 - At least one configured provider key in `free-claude-code`
 
 Recommended providers:
@@ -142,11 +144,19 @@ Change it in VS Code settings if your Odysseus server uses another address:
 
 ## Start The Gateway
 
-Run:
+Normally you do not need to open the gateway admin page or start the server manually. When the **Free AI** panel opens, the extension checks:
+
+```text
+http://127.0.0.1:8082/health
+```
+
+If the gateway is not running, it starts:
 
 ```powershell
 fcc-server
 ```
+
+The panel also has **Start** and **Check** buttons for the gateway.
 
 If you see:
 
@@ -166,6 +176,14 @@ Expected:
 
 ```json
 {"status":"healthy"}
+```
+
+You can change or disable the automatic startup in VS Code settings:
+
+```json
+"freeAiConsole.autoStartGateway": true,
+"freeAiConsole.gatewayCommand": "fcc-server",
+"freeAiConsole.gatewayStartupTimeoutSeconds": 20
 ```
 
 ## One-Shot Terminal Usage
@@ -319,6 +337,8 @@ Set the gateway and token in your User or Workspace settings (Settings UI or `se
 ```json
 "freeAiConsole.gatewayUrl": "http://127.0.0.1:8082",
 "freeAiConsole.authToken": "freecc",
+"freeAiConsole.autoStartGateway": true,
+"freeAiConsole.gatewayCommand": "fcc-server",
 "freeAiConsole.odysseusUrl": "http://127.0.0.1:7000",
 "freeAiConsole.defaultProvider": "auto",
 "freeAiConsole.autoMode": "balanced",
@@ -331,3 +351,19 @@ Set the gateway and token in your User or Workspace settings (Settings UI or `se
 If you want me to install the generated VSIX now or launch the Extension Development Host for a quick interactive test, say which one and I'll proceed.
 
 The scripts assume your keys are already configured inside your local `free-claude-code` setup.
+
+## Direction
+
+The intended direction is an installable local app or site-like UI:
+
+```text
+Free AI Chat UI
+        |
+        v
+local gateway managed in the background
+        |
+        v
+user-owned provider keys and local models
+```
+
+Each user should enter and own their own API keys locally. The project should avoid shipping shared keys, committing keys, or depending on one developer's gateway configuration.

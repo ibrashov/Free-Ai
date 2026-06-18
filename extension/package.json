@@ -16,7 +16,9 @@
     "onCommand:freeAiConsole.openChat",
     "onCommand:freeAiConsole.refreshFreeModels",
     "onCommand:freeAiConsole.testProviders",
-    "onCommand:freeAiConsole.openProviderStatus"
+    "onCommand:freeAiConsole.openProviderStatus",
+    "onCommand:freeAiConsole.startGateway",
+    "onCommand:freeAiConsole.checkGateway"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -36,6 +38,14 @@
       {
         "command": "freeAiConsole.openProviderStatus",
         "title": "Free AI: Open Provider Status"
+      },
+      {
+        "command": "freeAiConsole.startGateway",
+        "title": "Free AI: Start Gateway"
+      },
+      {
+        "command": "freeAiConsole.checkGateway",
+        "title": "Free AI: Check Gateway"
       }
     ],
     "viewsContainers": {
@@ -68,6 +78,23 @@
           "type": "string",
           "default": "freecc",
           "description": "Gateway auth token."
+        },
+        "freeAiConsole.autoStartGateway": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the local free-claude-code gateway when the Free AI panel opens."
+        },
+        "freeAiConsole.gatewayCommand": {
+          "type": "string",
+          "default": "fcc-server",
+          "description": "Command used to start the local free-claude-code gateway."
+        },
+        "freeAiConsole.gatewayStartupTimeoutSeconds": {
+          "type": "number",
+          "default": 20,
+          "minimum": 3,
+          "maximum": 120,
+          "description": "Maximum time to wait for the local gateway to become healthy after starting it."
         },
         "freeAiConsole.defaultProvider": {
           "type": "string",

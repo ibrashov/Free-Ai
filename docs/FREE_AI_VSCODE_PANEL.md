@@ -8,7 +8,7 @@ It uses:
 http://127.0.0.1:8082
 ```
 
-So it needs `free-claude-code` server running.
+The extension checks this gateway when the panel opens. If it is not running, it starts `fcc-server` automatically by default.
 
 ## Install
 
@@ -23,6 +23,16 @@ Then restart VS Code.
 ## Use
 
 Open the `Free AI` icon in the VS Code Activity Bar.
+
+At the top of the panel, the gateway status shows whether the local server is running. Use **Start** to launch `fcc-server` manually or **Check** to re-check `/health`.
+
+Automatic startup can be changed in VS Code settings:
+
+```json
+"freeAiConsole.autoStartGateway": true,
+"freeAiConsole.gatewayCommand": "fcc-server",
+"freeAiConsole.gatewayStartupTimeoutSeconds": 20
+```
 
 The panel is separate from:
 
