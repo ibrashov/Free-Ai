@@ -71,7 +71,7 @@
     "supportsTools": true,
     "supportsOpenCode": true,
     "priority": 50,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "gemma",
@@ -83,7 +83,7 @@
     "supportsTools": false,
     "supportsOpenCode": true,
     "priority": 85,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "ollama",
@@ -95,6 +95,6 @@
     "supportsTools": false,
     "supportsOpenCode": true,
     "priority": 90,
-    "enabled": true
+    "enabled": false
   }
 ]
