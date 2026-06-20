@@ -1,4 +1,5 @@
 const vscode = require("vscode");
+const fs = require("fs");
 const path = require("path");
 const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
@@ -10,12 +11,15 @@ const OPENCODE_PROVIDER = "opencode";
 const OPENCODE_MODEL = "anthropic/claude-sonnet-4-0";
 const DEFAULT_LOCAL_CODER_MODEL = "ollama/qwen2.5-coder:3b";
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
+const DEFAULT_OLLAMA_COMMAND = "ollama serve";
+const DEFAULT_OLLAMA_MODELS_DIRECTORY = "C:\\OllamaModels";
 const DEFAULT_GATEWAY_URL = "http://127.0.0.1:8082";
 const DEFAULT_GATEWAY_COMMAND = "fcc-server";
 const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
 const DISCOVERY_TIMEOUT_MS = 15000;
 const GATEWAY_HEALTH_TIMEOUT_MS = 2500;
 const GATEWAY_STARTUP_TIMEOUT_MS = 20000;
+const OLLAMA_STARTUP_TIMEOUT_MS = 20000;
 const PROVIDER_TEST_TIMEOUT_MS = 60000;
 const PROVIDER_STATE_KEY = "freeAi.providerState";
 const DISCOVERY_FILE = "provider-candidates.json";
@@ -73,6 +77,7 @@ class FreeAiViewProvider {
       detail: ""
     };
     this.gatewayStartPromise = null;
+    this.ollamaStartPromise = null;
   }
 
   async loadChats() {
@@ -318,6 +323,7 @@ class FreeAiViewProvider {
       webviewView.webview.html = this.getHtml(webviewView.webview);
       this.postGatewayStatus();
       this.ensureGatewayRunning({ force: false, showMessage: false });
+      this.ensureOllamaRunning({ force: false, showMessage: false });
     }).catch((error) => {
       const chat = createChatRecord();
       this.chats = [chat];
@@ -325,6 +331,7 @@ class FreeAiViewProvider {
       webviewView.webview.html = this.getHtml(webviewView.webview);
       this.postGatewayStatus();
       this.ensureGatewayRunning({ force: false, showMessage: false });
+      this.ensureOllamaRunning({ force: false, showMessage: false });
       this.post({ type: "error", text: `Could not load chat database: ${getErrorMessage(error)}` });
     });
   }
@@ -391,6 +398,13 @@ class FreeAiViewProvider {
         this.post({ type: "status", text: `${route.mode}: ${selectedProvider.label} (${route.reason})...` });
 
         try {
+          if (providerRequiresOllama(selectedProvider, config)) {
+            const ollama = await this.ensureOllamaRunning({ force: false, showMessage: false });
+            if (ollama.state !== "ready") {
+              throw new Error(`${ollama.text}${ollama.detail ? `: ${ollama.detail}` : ""}`);
+            }
+          }
+
           const answer = selectedProvider.id === OPENCODE_PROVIDER
             ? await askOpenCode({
               command: config.openCodeCommand,
@@ -554,6 +568,85 @@ class FreeAiViewProvider {
     }
   }
 
+  async ensureOllamaRunning(options = {}) {
+    const { force = false, showMessage = false } = options;
+    const config = this.getConfig();
+
+    const existing = await getOllamaHealth(config.ollamaUrl);
+    if (existing.ok) {
+      const status = {
+        state: "ready",
+        text: `Ollama: running at ${config.ollamaUrl}`,
+        detail: ""
+      };
+      if (showMessage) {
+        vscode.window.showInformationMessage(status.text);
+      }
+      return status;
+    }
+
+    if (!isLocalServiceUrl(config.ollamaUrl)) {
+      return {
+        state: "stopped",
+        text: `Ollama: not running at ${config.ollamaUrl}`,
+        detail: existing.error
+      };
+    }
+
+    if (!force && !config.autoStartOllama) {
+      return {
+        state: "disabled",
+        text: "Ollama: auto-start is off",
+        detail: "Enable freeAiConsole.autoStartOllama or start Ollama manually."
+      };
+    }
+
+    if (this.ollamaStartPromise) {
+      return this.ollamaStartPromise;
+    }
+
+    this.ollamaStartPromise = this.startOllamaProcess(config, showMessage)
+      .finally(() => {
+        this.ollamaStartPromise = null;
+      });
+
+    return this.ollamaStartPromise;
+  }
+
+  async startOllamaProcess(config, showMessage) {
+    const commandLine = config.ollamaCommand || getDefaultOllamaCommand();
+
+    try {
+      await spawnDetachedProcess(commandLine, {
+        env: getOllamaStartEnv(config)
+      });
+      const health = await waitForOllamaHealth(config.ollamaUrl, config.ollamaStartupTimeoutMs);
+      if (!health.ok) {
+        throw new Error(health.error || `Ollama did not become ready within ${Math.round(config.ollamaStartupTimeoutMs / 1000)}s.`);
+      }
+
+      const status = {
+        state: "ready",
+        text: `Ollama: running at ${config.ollamaUrl}`,
+        detail: ""
+      };
+      if (showMessage) {
+        vscode.window.showInformationMessage(status.text);
+      }
+      return status;
+    } catch (error) {
+      const status = {
+        state: "error",
+        text: "Ollama: could not start",
+        detail: getErrorMessage(error)
+      };
+      if (showMessage) {
+        vscode.window.showErrorMessage(`${status.text}. ${status.detail}`);
+      }
+      return status;
+    }
+  }
+
   getConfig() {
     const config = vscode.workspace.getConfiguration("freeAiConsole");
     return {
@@ -564,6 +657,13 @@ class FreeAiViewProvider {
       gatewayStartupTimeoutMs: Math.max(
         3000,
         Number(config.get("gatewayStartupTimeoutSeconds", GATEWAY_STARTUP_TIMEOUT_MS / 1000)) * 1000
+      ),
+      autoStartOllama: config.get("autoStartOllama", true),
+      ollamaCommand: normalizeOllamaCommand(config.get("ollamaCommand", DEFAULT_OLLAMA_COMMAND)),
+      ollamaModelsDirectory: String(config.get("ollamaModelsDirectory", DEFAULT_OLLAMA_MODELS_DIRECTORY) || "").trim(),
+      ollamaStartupTimeoutMs: Math.max(
+        3000,
+        Number(config.get("ollamaStartupTimeoutSeconds", OLLAMA_STARTUP_TIMEOUT_MS / 1000)) * 1000
       ),
       defaultProvider: config.get("defaultProvider", "auto"),
       autoMode: config.get("autoMode", "balanced"),
@@ -660,6 +760,9 @@ class FreeAiViewProvider {
     if (catalog.some((provider) => providerUsesGateway(provider, config))) {
       await this.ensureGatewayRunning({ force: false, showMessage: false });
     }
+    if (catalog.some((provider) => providerUsesOllama(provider, config))) {
+      await this.ensureOllamaRunning({ force: false, showMessage: false });
+    }
     const results = [];
     this.post({ type: "status", text: "Testing Free AI providers..." });
 
@@ -683,6 +786,7 @@ class FreeAiViewProvider {
   async refreshFreeModels() {
     const config = this.getConfig();
     this.post({ type: "status", text: "Refreshing free model candidates..." });
+    await this.ensureOllamaRunning({ force: false, showMessage: false });
     const result = await discoverFreeModelCandidates(config);
     await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
     await vscode.workspace.fs.writeFile(this.discoveryUri, Buffer.from(JSON.stringify(result, null, 2), "utf8"));
@@ -1896,10 +2000,10 @@ function splitCommandLine(value) {
   return tokens;
 }
 
-function spawnDetachedProcess(commandLine) {
+function spawnDetachedProcess(commandLine, options = {}) {
   const [command, ...args] = splitCommandLine(commandLine);
   if (!command) {
-    throw new Error("Gateway command is empty.");
+    throw new Error("Command is empty.");
   }
 
   return new Promise((resolve, reject) => {
@@ -1909,6 +2013,10 @@ function spawnDetachedProcess(commandLine) {
     try {
       child = spawn(command, args, {
         detached: true,
+        env: {
+          ...process.env,
+          ...(options.env || {})
+        },
         stdio: "ignore",
         windowsHide: true
       });
@@ -1932,6 +2040,37 @@ function spawnDetachedProcess(commandLine) {
       }
     });
   });
+}
+
+function getDefaultOllamaCommand() {
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA;
+    if (localAppData) {
+      const installedExe = path.join(localAppData, "Programs", "Ollama", "ollama.exe");
+      if (fs.existsSync(installedExe)) {
+        return `"${installedExe}" serve`;
+      }
+    }
+  }
+  return DEFAULT_OLLAMA_COMMAND;
+}
+
+function normalizeOllamaCommand(command) {
+  const value = String(command || "").trim();
+  const lower = value.toLowerCase();
+  if (!value || lower === "ollama" || lower === DEFAULT_OLLAMA_COMMAND) {
+    return getDefaultOllamaCommand();
+  }
+  return value;
+}
+
+function getOllamaStartEnv(config = {}) {
+  const modelDir = String(config.ollamaModelsDirectory || "").trim();
+  return modelDir ? { OLLAMA_MODELS: modelDir } : {};
+}
+
+function isLocalServiceUrl(value) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\b/i.test(String(value || ""));
 }
 
 async function getGatewayHealth(gatewayUrl, timeoutMs = GATEWAY_HEALTH_TIMEOUT_MS) {
@@ -1963,6 +2102,26 @@ async function getGatewayHealth(gatewayUrl, timeoutMs = GATEWAY_HEALTH_TIMEOUT_M
   }
 }
 
+async function getOllamaHealth(ollamaUrl, timeoutMs = GATEWAY_HEALTH_TIMEOUT_MS) {
+  const url = `${String(ollamaUrl || DEFAULT_OLLAMA_URL).replace(/\/$/, "")}/api/version`;
+
+  try {
+    const response = await fetchWithTimeout(url, {}, timeoutMs);
+    const raw = await response.text();
+    return {
+      ok: response.ok,
+      detail: raw || `HTTP ${response.status}`,
+      error: response.ok ? "" : raw || `Ollama health failed: HTTP ${response.status}`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: "",
+      error: getErrorMessage(error)
+    };
+  }
+}
+
 async function waitForGatewayHealth(gatewayUrl, timeoutMs = GATEWAY_STARTUP_TIMEOUT_MS) {
   const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || GATEWAY_STARTUP_TIMEOUT_MS);
   let last = {
@@ -1972,6 +2131,24 @@ async function waitForGatewayHealth(gatewayUrl, timeoutMs = GATEWAY_STARTUP_TIME
 
   while (Date.now() < deadline) {
     last = await getGatewayHealth(gatewayUrl);
+    if (last.ok) {
+      return last;
+    }
+    await sleep(500);
+  }
+
+  return last;
+}
+
+async function waitForOllamaHealth(ollamaUrl, timeoutMs = OLLAMA_STARTUP_TIMEOUT_MS) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || OLLAMA_STARTUP_TIMEOUT_MS);
+  let last = {
+    ok: false,
+    error: "Ollama was not checked."
+  };
+
+  while (Date.now() < deadline) {
+    last = await getOllamaHealth(ollamaUrl);
     if (last.ok) {
       return last;
     }
@@ -2266,10 +2443,10 @@ function shouldUseOpenCodeAgent(lowerPrompt) {
 function selectRoute(options) {
   const { prompt, requestedProvider, autoMode, catalog, providerState, hasReferencedFiles } = options;
   const enabled = catalog.filter((provider) => provider.enabled);
-  const localProvider = getPreferredLocalProvider(enabled);
+  const localProvider = getPreferredLocalProvider(catalog);
 
   if (requestedProvider && requestedProvider !== "auto") {
-    const manualProvider = enabled.find((provider) => provider.id === requestedProvider) || enabled[0];
+    const manualProvider = catalog.find((provider) => provider.id === requestedProvider) || enabled[0] || catalog[0];
     const providers = manualProvider ? [manualProvider] : [];
     if (manualProvider?.role === "chat" && localProvider && localProvider.id !== manualProvider.id) {
       providers.push(localProvider);
@@ -2283,7 +2460,7 @@ function selectRoute(options) {
   }
 
   if (/\bgemma\b/i.test(String(prompt || ""))) {
-    const gemmaProvider = enabled.find((provider) => provider.id === "gemma");
+    const gemmaProvider = catalog.find((provider) => provider.id === "gemma");
     if (gemmaProvider) {
       return {
         mode: "Local",
@@ -2305,7 +2482,7 @@ function selectRoute(options) {
 
   const intent = classifyPrompt(prompt, hasReferencedFiles);
   if (intent.agent) {
-    const agentProvider = enabled.find((provider) => provider.role === "agent");
+    const agentProvider = catalog.find((provider) => provider.role === "agent");
     return {
       mode: "Agent",
       reason: intent.reason,
@@ -2456,6 +2633,32 @@ function providerUsesGateway(provider, config = {}) {
       ? (config.localCoderModel || provider.model)
       : provider.model;
   return !String(model || "").startsWith("ollama/");
+}
+
+function providerUsesOllama(provider, config = {}) {
+  if (!provider) {
+    return false;
+  }
+  if (provider.id === OPENCODE_PROVIDER) {
+    return String(config.openCodeModel || provider.model || "").startsWith("ollama/")
+      || Boolean(config.openCodeFallbackToOllama);
+  }
+  const model = provider.id === "ollama"
+    ? (config.localCoderModel || provider.model)
+    : provider.model;
+  return String(model || "").startsWith("ollama/");
+}
+
+function providerRequiresOllama(provider, config = {}) {
+  if (!provider) {
+    return false;
+  }
+  const model = provider.id === OPENCODE_PROVIDER
+    ? (config.openCodeModel || provider.model)
+    : provider.id === "ollama"
+      ? (config.localCoderModel || provider.model)
+      : provider.model;
+  return String(model || "").startsWith("ollama/");
 }
 
 function buildProviderCatalog(config) {
@@ -2958,6 +3161,7 @@ module.exports = {
     normalizeChatStore,
     normalizeProviderState,
     providerUsesGateway,
+    providerUsesOllama,
     selectRoute,
     testProviderAvailability
   }

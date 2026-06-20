@@ -96,6 +96,28 @@
           "maximum": 120,
           "description": "Maximum time to wait for the local gateway to become healthy after starting it."
         },
+        "freeAiConsole.autoStartOllama": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start local Ollama when the Free AI panel opens or a local provider is used."
+        },
+        "freeAiConsole.ollamaCommand": {
+          "type": "string",
+          "default": "ollama serve",
+          "description": "Command used to start the local Ollama server."
+        },
+        "freeAiConsole.ollamaModelsDirectory": {
+          "type": "string",
+          "default": "C:\\OllamaModels",
+          "description": "OLLAMA_MODELS directory used when Free AI starts Ollama. Leave empty to use Ollama's default model store."
+        },
+        "freeAiConsole.ollamaStartupTimeoutSeconds": {
+          "type": "number",
+          "default": 20,
+          "minimum": 3,
+          "maximum": 120,
+          "description": "Maximum time to wait for Ollama to become healthy after starting it."
+        },
         "freeAiConsole.defaultProvider": {
           "type": "string",
           "default": "auto",
