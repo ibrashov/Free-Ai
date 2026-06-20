@@ -64,14 +64,14 @@
   {
     "id": "opencode",
     "label": "OpenCode Agent",
-    "model": "anthropic/claude-sonnet-4-0",
+    "model": "ollama/qwen2.5-coder:3b",
     "role": "agent",
-    "costTier": "free-via-gateway",
-    "quotaType": "gateway-provider",
+    "costTier": "local-free",
+    "quotaType": "local-hardware",
     "supportsTools": true,
     "supportsOpenCode": true,
     "priority": 50,
-    "enabled": false
+    "enabled": true
   },
   {
     "id": "gemma",

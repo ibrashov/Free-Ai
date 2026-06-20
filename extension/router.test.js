@@ -31,9 +31,13 @@ const { _test } = require("./extension");
 
 const config = {
   localCoderModel: "ollama/qwen2.5-coder:3b",
-  openCodeModel: "anthropic/claude-sonnet-4-0"
+  openCodeModel: "ollama/qwen2.5-coder:3b"
 };
 const catalog = _test.buildProviderCatalog(config);
+const openCodeProvider = catalog.find((provider) => provider.id === "opencode");
+
+assert.ok(openCodeProvider.enabled);
+assert.equal(openCodeProvider.model, "ollama/qwen2.5-coder:3b");
 
 function route(input) {
   return _test.selectRoute({
@@ -118,7 +122,22 @@ assert.equal(brokenLocalState.lastError, "Ollama model failed");
 assert.equal(_test.getProviderRuntimeState({ id: "ollama", role: "local-fallback" }, {}).status, "Local");
 assert.equal(_test.providerUsesGateway({ id: "cerebras", model: "cerebras/gpt-oss-120b" }, {}), true);
 assert.equal(_test.providerUsesGateway({ id: "gemma", model: "ollama/gemma3:4b" }, {}), false);
-assert.equal(_test.providerUsesGateway({ id: "opencode", model: "anthropic/claude-sonnet-4-0" }, { openCodeModel: "ollama/qwen2.5-coder:3b" }), false);
+assert.equal(_test.providerUsesGateway(openCodeProvider, config), false);
+assert.equal(_test.providerUsesOllama(openCodeProvider, config), true);
+assert.equal(_test.providerRequiresOllama(openCodeProvider, config), true);
+assert.deepEqual(_test.getOpenCodeRunArgs("hello", "ollama/qwen2.5-coder:3b"), [
+  "run",
+  "hello",
+  "-m",
+  "ollama/qwen2.5-coder:3b",
+  "--format",
+  "json"
+]);
+assert.equal(_test.parseOpenCodeRunOutput([
+  JSON.stringify({ type: "step_start", part: { type: "step-start" } }),
+  JSON.stringify({ type: "text", part: { type: "text", text: "Hel" } }),
+  JSON.stringify({ type: "text", part: { type: "text", text: "lo" } })
+].join("\n")), "Hello");
 
 const firstChat = _test.createChatRecord("New chat", [
   { role: "user", text: "My name is Anuar", timestamp: "2026-06-15T10:00:00.000Z" },

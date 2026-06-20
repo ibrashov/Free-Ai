@@ -160,13 +160,13 @@
         },
         "freeAiConsole.openCodeModel": {
           "type": "string",
-          "default": "anthropic/claude-sonnet-4-0",
-          "description": "OpenCode model in provider/model format."
+          "default": "ollama/qwen2.5-coder:3b",
+          "description": "OpenCode model in provider/model format. The default runs locally through Ollama."
         },
         "freeAiConsole.openCodeFallbackToOllama": {
           "type": "boolean",
           "default": true,
-          "description": "Retry OpenCode with the local Ollama model when the gateway/cloud provider is rate limited."
+          "description": "Retry OpenCode with the local Ollama model when a non-local provider is rate limited."
         },
         "freeAiConsole.providerCooldownMinutes": {
           "type": "number",

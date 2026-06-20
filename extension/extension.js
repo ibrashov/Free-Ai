@@ -8,8 +8,8 @@ const providerCatalog = require("./provider-catalog.json");
 const execFileAsync = promisify(execFile);
 
 const OPENCODE_PROVIDER = "opencode";
-const OPENCODE_MODEL = "anthropic/claude-sonnet-4-0";
 const DEFAULT_LOCAL_CODER_MODEL = "ollama/qwen2.5-coder:3b";
+const OPENCODE_MODEL = DEFAULT_LOCAL_CODER_MODEL;
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
 const DEFAULT_OLLAMA_COMMAND = "ollama serve";
 const DEFAULT_OLLAMA_MODELS_DIRECTORY = "C:\\OllamaModels";
@@ -2203,7 +2203,8 @@ async function testProviderAvailability(config, provider) {
   }
 
   if (provider.id === OPENCODE_PROVIDER) {
-    return `${normalizeOpenCodeCommand(config.openCodeCommand)} configured; chat smoke test skipped to avoid quota`;
+    const local = providerRequiresOllama(provider, config) ? "local Ollama model" : "configured model";
+    return `${normalizeOpenCodeCommand(config.openCodeCommand)} configured with ${local}; chat smoke test skipped`;
   }
 
   const gatewayProviderId = getGatewayProviderTestId(provider);
@@ -2385,12 +2386,13 @@ async function runOpenCode(options) {
   const { command, model, authToken, prompt, cwd, timeoutMs } = options;
   const { stdout, stderr } = await execFileAsync(
     normalizeOpenCodeCommand(command),
-    ["run", String(prompt || ""), "-m", model || OPENCODE_MODEL],
+    getOpenCodeRunArgs(prompt, model || OPENCODE_MODEL),
     {
       cwd,
       env: {
         ...process.env,
-        ANTHROPIC_API_KEY: authToken || "freecc"
+        ANTHROPIC_API_KEY: authToken || "freecc",
+        NO_COLOR: "1"
       },
       maxBuffer: 1024 * 1024 * 8,
       timeout: timeoutMs || 180000,
@@ -2398,13 +2400,17 @@ async function runOpenCode(options) {
     }
   );
 
-  const output = cleanTerminalText(stdout || "").trim();
+  const output = parseOpenCodeRunOutput(stdout) || cleanTerminalText(stdout || "").trim();
   const errorOutput = cleanTerminalText(stderr || "").trim();
   const text = output || errorOutput || "(OpenCode finished without text output)";
   if (isQuotaOrRateLimitError(text)) {
     throw new Error(text);
   }
   return text;
+}
+
+function getOpenCodeRunArgs(prompt, model) {
+  return ["run", String(prompt || ""), "-m", model || OPENCODE_MODEL, "--format", "json"];
 }
 
 function selectProviders(prompt, requestedProvider) {
@@ -2609,6 +2615,26 @@ function normalizeOpenCodeCommand(command) {
     return "opencode.cmd";
   }
   return value || getDefaultOpenCodeCommand();
+}
+
+function parseOpenCodeRunOutput(value) {
+  const parts = [];
+  for (const line of String(value || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith("{")) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(trimmed);
+      const text = event?.part?.type === "text" ? event.part.text : "";
+      if (typeof text === "string" && text) {
+        parts.push(text);
+      }
+    } catch {
+      // Ignore non-JSON progress lines from older OpenCode versions.
+    }
+  }
+  return parts.join("").trim();
 }
 
 function cleanTerminalText(value) {
@@ -3154,14 +3180,17 @@ module.exports = {
     formatOllamaError,
     getAutoChatProviders,
     getGatewayProviderTestId,
+    getOpenCodeRunArgs,
     getProviderRuntimeState,
     isQuotaOrRateLimitError,
     normalizeGatewayModelName,
     normalizeOllamaApiModel,
     normalizeChatStore,
     normalizeProviderState,
+    parseOpenCodeRunOutput,
     providerUsesGateway,
     providerUsesOllama,
+    providerRequiresOllama,
     selectRoute,
     testProviderAvailability
   }
