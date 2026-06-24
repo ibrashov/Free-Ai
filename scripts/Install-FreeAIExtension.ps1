@@ -1,6 +1,7 @@
 param(
     [string]$Source = (Join-Path (Split-Path -Parent $PSScriptRoot) "extension"),
-    [string]$Destination = (Join-Path $env:USERPROFILE ".vscode\extensions\anuar-free-ai-console-0.2.0")
+    [string]$Destination = (Join-Path $env:USERPROFILE ".vscode\extensions\anuar-local.anuar-free-ai-console-0.2.0"),
+    [string]$LegacyDestination = (Join-Path $env:USERPROFILE ".vscode\extensions\anuar-free-ai-console-0.2.0")
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,7 +56,18 @@ if (Test-Path $Destination) {
 
 Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
 
+if ($LegacyDestination -and $LegacyDestination -ne $Destination) {
+    if (Test-Path $LegacyDestination) {
+        Remove-Item -LiteralPath $LegacyDestination -Recurse -Force
+    }
+    Copy-Item -LiteralPath $Source -Destination $LegacyDestination -Recurse -Force
+}
+
 Write-Host "Free AI Console extension installed to:"
 Write-Host $Destination
+if ($LegacyDestination -and $LegacyDestination -ne $Destination) {
+    Write-Host "Compatibility copy installed to:"
+    Write-Host $LegacyDestination
+}
 Write-Host ""
 Write-Host "Restart VS Code, then open the Free AI icon in the Activity Bar."

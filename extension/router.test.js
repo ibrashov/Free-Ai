@@ -36,6 +36,32 @@ const config = {
 const catalog = _test.buildProviderCatalog(config);
 const openCodeProvider = catalog.find((provider) => provider.id === "opencode");
 
+function createProvider(configOverrides = {}) {
+  const provider = new _test.FreeAiViewProvider({}, {
+    globalStorageUri: {},
+    globalState: {
+      get: (_key, fallback) => fallback,
+      update: async () => {}
+    }
+  });
+  provider.getConfig = () => ({
+    autoStartOllama: true,
+    ollamaCommand: "ollama serve",
+    ollamaModelsDirectory: "C:\\OllamaModels",
+    ollamaStartupTimeoutMs: 3000,
+    ollamaUrl: "http://127.0.0.1:11434",
+    localCoderModel: "ollama/qwen2.5-coder:3b",
+    openCodeModel: "ollama/qwen2.5-coder:3b",
+    openCodeFallbackToOllama: true,
+    ...configOverrides
+  });
+  return provider;
+}
+
+function nextTick() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 assert.ok(openCodeProvider.enabled);
 assert.equal(openCodeProvider.model, "ollama/qwen2.5-coder:3b");
 
@@ -83,6 +109,28 @@ assert.ok(!route({ prompt: "Compare maps", autoMode: "compare" }).providers.some
 assert.equal(_test.isQuotaOrRateLimitError("Provider rate limit reached"), true);
 assert.equal(_test.normalizeOllamaApiModel("ollama/gemma3:4b"), "gemma3:4b");
 assert.equal(_test.normalizeOllamaApiModel("qwen2.5-coder:3b"), "qwen2.5-coder:3b");
+const defaultOllamaCommand = _test.normalizeOllamaCommand("ollama serve");
+assert.match(defaultOllamaCommand, /ollama/i);
+assert.match(defaultOllamaCommand, /\bserve\b/i);
+assert.doesNotMatch(defaultOllamaCommand, /powershell|cmd/i);
+assert.deepEqual(_test.splitCommandLine('"C:\\Program Files\\Ollama\\ollama.exe" serve'), [
+  "C:\\Program Files\\Ollama\\ollama.exe",
+  "serve"
+]);
+assert.deepEqual(_test.getOllamaStartEnv({ ollamaModelsDirectory: "C:\\OllamaModels" }), {
+  OLLAMA_MODELS: "C:\\OllamaModels"
+});
+assert.deepEqual(_test.getOllamaStartEnv({ ollamaModelsDirectory: "   " }), {});
+assert.deepEqual(_test.getProviderOllamaModels(openCodeProvider, {
+  localCoderModel: "ollama/qwen2.5-coder:3b",
+  openCodeModel: "open_router/google/gemma-4-31b-it:free",
+  openCodeFallbackToOllama: true
+}), ["qwen2.5-coder:3b"]);
+assert.deepEqual(_test.getRequiredOllamaModels({
+  localCoderModel: "ollama/qwen2.5-coder:3b",
+  openCodeModel: "open_router/google/gemma-4-31b-it:free",
+  openCodeFallbackToOllama: true
+}, [], ["ollama/gemma3:4b"]), ["gemma3:4b", "qwen2.5-coder:3b"]);
 assert.equal(_test.getGatewayProviderTestId("gemini-fast"), "gemini");
 assert.equal(_test.getGatewayProviderTestId("openrouter"), "open_router");
 assert.equal(_test.getGatewayProviderTestId("ollama"), "");
@@ -531,7 +579,123 @@ assert.equal(webview.messages[7].type, "deleteChat");
 assert.equal(webview.messages[7].chatId, firstChat.id);
 assert.equal(webview.document.getElementById("delete-active-chat"), null);
 
+async function runOllamaAutoStartTests() {
+  const runningProvider = createProvider();
+  let runningStarts = 0;
+  runningProvider.checkOllamaHealth = async () => ({ ok: true, error: "" });
+  runningProvider.checkOllamaModels = async () => ({ ok: true, missing: [], error: "" });
+  runningProvider.startOllamaProcess = async () => {
+    runningStarts += 1;
+    throw new Error("already-running Ollama should not be started");
+  };
+  const running = await runningProvider.ensureOllamaRunning();
+  assert.equal(running.state, "ready");
+  assert.equal(runningStarts, 0);
+
+  const disabledProvider = createProvider({ autoStartOllama: false });
+  let disabledStarts = 0;
+  disabledProvider.checkOllamaHealth = async () => ({ ok: false, error: "connection refused" });
+  disabledProvider.startOllamaProcess = async () => {
+    disabledStarts += 1;
+    throw new Error("disabled auto-start should not start Ollama");
+  };
+  const disabled = await disabledProvider.ensureOllamaRunning();
+  assert.equal(disabled.state, "disabled");
+  assert.equal(disabledStarts, 0);
+
+  const remoteProvider = createProvider({ ollamaUrl: "https://ollama.example.test" });
+  let remoteStarts = 0;
+  remoteProvider.checkOllamaHealth = async () => ({ ok: false, error: "not reachable" });
+  remoteProvider.startOllamaProcess = async () => {
+    remoteStarts += 1;
+    throw new Error("remote Ollama URL should not start a local process");
+  };
+  const remote = await remoteProvider.ensureOllamaRunning();
+  assert.equal(remote.state, "stopped");
+  assert.equal(remoteStarts, 0);
+
+  const wrongStoreProvider = createProvider();
+  let restarts = 0;
+  let restartModels = [];
+  wrongStoreProvider.checkOllamaHealth = async () => ({ ok: true, error: "" });
+  wrongStoreProvider.checkOllamaModels = async (_url, models) => ({
+    ok: false,
+    required: models,
+    missing: ["qwen2.5-coder:3b"],
+    models: [],
+    error: "Missing model(s): qwen2.5-coder:3b"
+  });
+  wrongStoreProvider.restartOllamaProcess = async (_config, _showMessage, models) => {
+    restarts += 1;
+    restartModels = models;
+    return {
+      state: "ready",
+      text: "Ollama: running at http://127.0.0.1:11434",
+      detail: ""
+    };
+  };
+  const repaired = await wrongStoreProvider.ensureOllamaRunning({
+    models: ["ollama/qwen2.5-coder:3b"]
+  });
+  assert.equal(repaired.state, "ready");
+  assert.equal(restarts, 1);
+  assert.ok(restartModels.includes("qwen2.5-coder:3b"));
+
+  const missingDisabledProvider = createProvider({ autoStartOllama: false });
+  let disabledRestarts = 0;
+  missingDisabledProvider.checkOllamaHealth = async () => ({ ok: true, error: "" });
+  missingDisabledProvider.checkOllamaModels = async () => ({
+    ok: false,
+    missing: ["qwen2.5-coder:3b"],
+    error: "Missing model(s): qwen2.5-coder:3b"
+  });
+  missingDisabledProvider.restartOllamaProcess = async () => {
+    disabledRestarts += 1;
+    throw new Error("disabled auto-start should not restart Ollama");
+  };
+  const missingDisabled = await missingDisabledProvider.ensureOllamaRunning();
+  assert.equal(missingDisabled.state, "disabled");
+  assert.equal(disabledRestarts, 0);
+
+  const concurrentProvider = createProvider();
+  let healthChecks = 0;
+  let starts = 0;
+  let finishStart;
+  const startedStatus = {
+    state: "ready",
+    text: "Ollama: running at http://127.0.0.1:11434",
+    detail: ""
+  };
+  concurrentProvider.checkOllamaHealth = async () => {
+    healthChecks += 1;
+    return { ok: false, error: "connection refused" };
+  };
+  concurrentProvider.startOllamaProcess = async () => {
+    starts += 1;
+    return new Promise((resolve) => {
+      finishStart = () => resolve(startedStatus);
+    });
+  };
+
+  const first = concurrentProvider.ensureOllamaRunning();
+  const second = concurrentProvider.ensureOllamaRunning();
+  await nextTick();
+  assert.equal(starts, 1);
+
+  const third = concurrentProvider.ensureOllamaRunning();
+  await nextTick();
+  assert.equal(starts, 1);
+  assert.equal(healthChecks, 3);
+
+  finishStart();
+  const results = await Promise.all([first, second, third]);
+  assert.deepEqual(results, [startedStatus, startedStatus, startedStatus]);
+  assert.equal(concurrentProvider.ollamaStartPromise, null);
+}
+
 (async () => {
+  await runOllamaAutoStartTests();
+
   const confirmFirstChat = _test.createChatRecord("Confirm delete", []);
   const confirmSecondChat = _test.createChatRecord("Keep chat", []);
   const requestDeleteProvider = new _test.FreeAiViewProvider({}, {

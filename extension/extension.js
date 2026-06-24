@@ -398,8 +398,13 @@ class FreeAiViewProvider {
         this.post({ type: "status", text: `${route.mode}: ${selectedProvider.label} (${route.reason})...` });
 
         try {
+          const selectedOllamaModels = getProviderOllamaModels(selectedProvider, config);
           if (providerRequiresOllama(selectedProvider, config)) {
-            const ollama = await this.ensureOllamaRunning({ force: false, showMessage: false });
+            const ollama = await this.ensureOllamaRunning({
+              force: false,
+              showMessage: false,
+              models: selectedOllamaModels
+            });
             if (ollama.state !== "ready") {
               throw new Error(`${ollama.text}${ollama.detail ? `: ${ollama.detail}` : ""}`);
             }
@@ -412,7 +417,12 @@ class FreeAiViewProvider {
               localModel: config.localCoderModel,
               authToken: config.authToken,
               prompt: text,
-              fallbackToOllama: config.openCodeFallbackToOllama
+              fallbackToOllama: config.openCodeFallbackToOllama,
+              ensureOllama: (model) => this.ensureOllamaRunning({
+                force: false,
+                showMessage: false,
+                models: [model]
+              })
             })
             : await askFreeProvider(config, selectedProvider, text);
           if (!String(answer || "").trim()) {
@@ -569,11 +579,50 @@ class FreeAiViewProvider {
   }
 
   async ensureOllamaRunning(options = {}) {
-    const { force = false, showMessage = false } = options;
+    const { force = false, showMessage = false, models = [] } = options;
     const config = this.getConfig();
+    const requiredModels = getRequiredOllamaModels(config, this.getCatalog(config), models);
 
-    const existing = await getOllamaHealth(config.ollamaUrl);
+    const existing = await this.checkOllamaHealth(config.ollamaUrl);
     if (existing.ok) {
+      const modelStatus = await this.checkOllamaModels(config.ollamaUrl, requiredModels);
+      if (!modelStatus.ok) {
+        if (!isLocalServiceUrl(config.ollamaUrl)) {
+          return {
+            state: "stopped",
+            text: `Ollama: model storage is not ready at ${config.ollamaUrl}`,
+            detail: formatOllamaModelStatusError(modelStatus, config)
+          };
+        }
+
+        if (!force && !config.autoStartOllama) {
+          return {
+            state: "disabled",
+            text: "Ollama: auto-start is off",
+            detail: `${formatOllamaModelStatusError(modelStatus, config)} Enable freeAiConsole.autoStartOllama or restart Ollama manually.`
+          };
+        }
+
+        if (!config.ollamaModelsDirectory) {
+          return {
+            state: "error",
+            text: "Ollama: model storage is not ready",
+            detail: `${formatOllamaModelStatusError(modelStatus, config)} Set freeAiConsole.ollamaModelsDirectory or repair the active Ollama server.`
+          };
+        }
+
+        if (this.ollamaStartPromise) {
+          return this.ollamaStartPromise;
+        }
+
+        this.ollamaStartPromise = this.restartOllamaProcess(config, showMessage, requiredModels)
+          .finally(() => {
+            this.ollamaStartPromise = null;
+          });
+
+        return this.ollamaStartPromise;
+      }
+
       const status = {
         state: "ready",
         text: `Ollama: running at ${config.ollamaUrl}`,
@@ -605,7 +654,7 @@ class FreeAiViewProvider {
       return this.ollamaStartPromise;
     }
 
-    this.ollamaStartPromise = this.startOllamaProcess(config, showMessage)
+    this.ollamaStartPromise = this.startOllamaProcess(config, showMessage, requiredModels)
       .finally(() => {
         this.ollamaStartPromise = null;
       });
@@ -613,7 +662,7 @@ class FreeAiViewProvider {
     return this.ollamaStartPromise;
   }
 
-  async startOllamaProcess(config, showMessage) {
+  async startOllamaProcess(config, showMessage, models = []) {
     const commandLine = config.ollamaCommand || getDefaultOllamaCommand();
 
     try {
@@ -623,6 +672,12 @@ class FreeAiViewProvider {
       const health = await waitForOllamaHealth(config.ollamaUrl, config.ollamaStartupTimeoutMs);
       if (!health.ok) {
         throw new Error(health.error || `Ollama did not become ready within ${Math.round(config.ollamaStartupTimeoutMs / 1000)}s.`);
+      }
+
+      const requiredModels = getRequiredOllamaModels(config, this.getCatalog(config), models);
+      const modelStatus = await this.checkOllamaModels(config.ollamaUrl, requiredModels);
+      if (!modelStatus.ok) {
+        throw new Error(formatOllamaModelStatusError(modelStatus, config));
       }
 
       const status = {
@@ -645,6 +700,22 @@ class FreeAiViewProvider {
       }
       return status;
     }
+  }
+
+  async checkOllamaHealth(ollamaUrl) {
+    return getOllamaHealth(ollamaUrl);
+  }
+
+  async checkOllamaModels(ollamaUrl, models) {
+    return getOllamaModelStatus(ollamaUrl, models);
+  }
+
+  async restartOllamaProcess(config, showMessage, models = []) {
+    if (showMessage) {
+      vscode.window.showInformationMessage(`Restarting Ollama with OLLAMA_MODELS=${config.ollamaModelsDirectory}.`);
+    }
+    await stopOllamaProcesses();
+    return this.startOllamaProcess(config, showMessage, models);
   }
 
   getConfig() {
@@ -2042,6 +2113,21 @@ function spawnDetachedProcess(commandLine, options = {}) {
   });
 }
 
+async function stopOllamaProcesses() {
+  try {
+    if (process.platform === "win32") {
+      await execFileAsync("taskkill", ["/IM", "ollama.exe", "/F", "/T"], {
+        windowsHide: true
+      });
+    } else {
+      await execFileAsync("pkill", ["-x", "ollama"]);
+    }
+  } catch {
+    // No running Ollama process is fine; the next health check will validate startup.
+  }
+  await sleep(1000);
+}
+
 function getDefaultOllamaCommand() {
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA;
@@ -2067,6 +2153,95 @@ function normalizeOllamaCommand(command) {
 function getOllamaStartEnv(config = {}) {
   const modelDir = String(config.ollamaModelsDirectory || "").trim();
   return modelDir ? { OLLAMA_MODELS: modelDir } : {};
+}
+
+function normalizeRequiredOllamaModel(model) {
+  const value = String(model || "").trim();
+  if (!value) {
+    return "";
+  }
+  const lower = value.toLowerCase();
+  if (lower.startsWith("ollama/")) {
+    return normalizeOllamaApiModel(value);
+  }
+  if (lower.startsWith("ollama:")) {
+    return value.slice("ollama:".length).trim();
+  }
+  return value.includes("/") ? "" : value;
+}
+
+function addRequiredOllamaModel(models, model) {
+  const normalized = normalizeRequiredOllamaModel(model);
+  if (normalized && !models.some((item) => item.toLowerCase() === normalized.toLowerCase())) {
+    models.push(normalized);
+  }
+}
+
+function normalizeRequiredOllamaModels(models) {
+  const result = [];
+  for (const model of Array.isArray(models) ? models : [models]) {
+    addRequiredOllamaModel(result, model);
+  }
+  return result;
+}
+
+function getProviderOllamaModels(provider, config = {}) {
+  const models = [];
+  if (!provider) {
+    return models;
+  }
+
+  const selectedModel = provider.id === OPENCODE_PROVIDER
+    ? (config.openCodeModel || provider.model || OPENCODE_MODEL)
+    : provider.id === "ollama"
+      ? (config.localCoderModel || provider.model || DEFAULT_LOCAL_CODER_MODEL)
+      : provider.model;
+  addRequiredOllamaModel(models, selectedModel);
+
+  if (provider.id === OPENCODE_PROVIDER && config.openCodeFallbackToOllama !== false) {
+    addRequiredOllamaModel(models, config.localCoderModel || DEFAULT_LOCAL_CODER_MODEL);
+  }
+
+  return models;
+}
+
+function getRequiredOllamaModels(config = {}, catalog = [], extraModels = []) {
+  const models = normalizeRequiredOllamaModels(extraModels);
+
+  for (const provider of Array.isArray(catalog) ? catalog : []) {
+    if (provider?.enabled === false) {
+      continue;
+    }
+    for (const model of getProviderOllamaModels(provider, config)) {
+      addRequiredOllamaModel(models, model);
+    }
+  }
+
+  for (const model of getProviderOllamaModels({
+    id: OPENCODE_PROVIDER,
+    model: config.openCodeModel || OPENCODE_MODEL
+  }, config)) {
+    addRequiredOllamaModel(models, model);
+  }
+
+  return models;
+}
+
+function formatOllamaModelStatusError(status = {}, config = {}) {
+  const missing = Array.isArray(status.missing) ? status.missing.filter(Boolean) : [];
+  const modelDir = String(config.ollamaModelsDirectory || "").trim();
+  const repairHint = missing.length > 0
+    ? ` Run .\\scripts\\Repair-OllamaLocalModels.ps1 -Model ${missing[0]}.`
+    : "";
+  const restartHint = modelDir
+    ? ` Restart Ollama with OLLAMA_MODELS=${modelDir}.`
+    : " Configure freeAiConsole.ollamaModelsDirectory or restart Ollama with the correct OLLAMA_MODELS value.";
+
+  if (missing.length > 0) {
+    return `Required Ollama model(s) are not visible to the active server: ${missing.join(", ")}.${restartHint}${repairHint}`;
+  }
+
+  return `Could not verify Ollama model storage.${status.error ? ` ${status.error}` : ""}${restartHint}`;
 }
 
 function isLocalServiceUrl(value) {
@@ -2117,6 +2292,69 @@ async function getOllamaHealth(ollamaUrl, timeoutMs = GATEWAY_HEALTH_TIMEOUT_MS)
     return {
       ok: false,
       detail: "",
+      error: getErrorMessage(error)
+    };
+  }
+}
+
+async function getOllamaModelStatus(ollamaUrl, requiredModels = [], timeoutMs = GATEWAY_HEALTH_TIMEOUT_MS) {
+  const required = normalizeRequiredOllamaModels(requiredModels);
+  if (required.length === 0) {
+    return {
+      ok: true,
+      required: [],
+      missing: [],
+      models: [],
+      error: ""
+    };
+  }
+
+  const url = `${String(ollamaUrl || DEFAULT_OLLAMA_URL).replace(/\/$/, "")}/api/tags`;
+  try {
+    const response = await fetchWithTimeout(url, {}, timeoutMs);
+    const raw = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        required,
+        missing: [],
+        models: [],
+        error: raw || `Ollama model list failed: HTTP ${response.status}`
+      };
+    }
+
+    let json = {};
+    try {
+      json = raw ? JSON.parse(raw) : {};
+    } catch {
+      return {
+        ok: false,
+        required,
+        missing: [],
+        models: [],
+        error: "Ollama returned an invalid model list."
+      };
+    }
+
+    const models = Array.isArray(json.models)
+      ? json.models.map((model) => normalizeRequiredOllamaModel(model?.name || model?.model)).filter(Boolean)
+      : [];
+    const visible = new Set(models.map((model) => model.toLowerCase()));
+    const missing = required.filter((model) => !visible.has(model.toLowerCase()));
+
+    return {
+      ok: missing.length === 0,
+      required,
+      missing,
+      models,
+      error: missing.length > 0 ? `Missing model(s): ${missing.join(", ")}` : ""
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      required,
+      missing: [],
+      models: [],
       error: getErrorMessage(error)
     };
   }
@@ -2340,6 +2578,7 @@ async function askOpenCode(options) {
     authToken,
     prompt,
     fallbackToOllama,
+    ensureOllama,
     timeoutMs
   } = options || {};
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -2371,9 +2610,16 @@ async function askOpenCode(options) {
     if (!fallbackToOllama || !isQuotaOrRateLimitError(getErrorMessage(error))) {
       throw error;
     }
+    const fallbackModel = normalizeOpenCodeOllamaModel(localModel || DEFAULT_LOCAL_CODER_MODEL);
+    if (typeof ensureOllama === "function") {
+      const ollama = await ensureOllama(fallbackModel);
+      if (ollama?.state !== "ready") {
+        throw new Error(`OpenCode fallback needs local Ollama. ${ollama?.text || "Ollama is not ready"}${ollama?.detail ? `: ${ollama.detail}` : ""}`);
+      }
+    }
     return runOpenCode({
       command,
-      model: normalizeOpenCodeOllamaModel(localModel || DEFAULT_LOCAL_CODER_MODEL),
+      model: fallbackModel,
       authToken,
       prompt: agentPrompt,
       cwd: workspaceFolder.uri.fsPath,
@@ -3180,10 +3426,14 @@ module.exports = {
     formatOllamaError,
     getAutoChatProviders,
     getGatewayProviderTestId,
+    getProviderOllamaModels,
+    getOllamaStartEnv,
+    getRequiredOllamaModels,
     getOpenCodeRunArgs,
     getProviderRuntimeState,
     isQuotaOrRateLimitError,
     normalizeGatewayModelName,
+    normalizeOllamaCommand,
     normalizeOllamaApiModel,
     normalizeChatStore,
     normalizeProviderState,
@@ -3192,6 +3442,7 @@ module.exports = {
     providerUsesOllama,
     providerRequiresOllama,
     selectRoute,
+    splitCommandLine,
     testProviderAvailability
   }
 };
