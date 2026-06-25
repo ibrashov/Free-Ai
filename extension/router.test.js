@@ -199,6 +199,19 @@ assert.deepEqual(_test.getOpenCodeRunArgs("hello", "ollama/qwen2.5-coder:3b"), [
   "--format",
   "json"
 ]);
+if (process.platform === "win32") {
+  assert.equal(_test.normalizeOpenCodeCommand("opencode"), "opencode.cmd");
+  assert.equal(_test.normalizeOpenCodeCommand(""), "opencode.cmd");
+  const openCodeInvocation = _test.getOpenCodeProcessInvocation("opencode", ["--version"]);
+  assert.match(openCodeInvocation.command, /cmd\.exe$/i);
+  assert.deepEqual(openCodeInvocation.args, ["/d", "/s", "/c", "opencode.cmd", "--version"]);
+} else {
+  assert.equal(_test.normalizeOpenCodeCommand("opencode"), "opencode");
+  assert.deepEqual(_test.getOpenCodeProcessInvocation("opencode", ["--version"]), {
+    command: "opencode",
+    args: ["--version"]
+  });
+}
 assert.equal(_test.parseOpenCodeRunOutput([
   JSON.stringify({ type: "step_start", part: { type: "step-start" } }),
   JSON.stringify({ type: "text", part: { type: "text", text: "Hel" } }),

@@ -2737,9 +2737,11 @@ async function askOpenCode(options) {
 
 async function runOpenCode(options) {
   const { command, model, authToken, prompt, cwd, timeoutMs } = options;
+  const runArgs = getOpenCodeRunArgs(prompt, model || OPENCODE_MODEL);
+  const invocation = getOpenCodeProcessInvocation(command, runArgs);
   const { stdout, stderr } = await execFileAsync(
-    normalizeOpenCodeCommand(command),
-    getOpenCodeRunArgs(prompt, model || OPENCODE_MODEL),
+    invocation.command,
+    invocation.args,
     {
       cwd,
       env: {
@@ -2764,6 +2766,25 @@ async function runOpenCode(options) {
 
 function getOpenCodeRunArgs(prompt, model) {
   return ["run", String(prompt || ""), "-m", model || OPENCODE_MODEL, "--format", "json"];
+}
+
+function isWindowsCommandShim(command) {
+  return process.platform === "win32" && /\.(cmd|bat)$/i.test(String(command || ""));
+}
+
+function getOpenCodeProcessInvocation(command, args = []) {
+  const normalizedCommand = normalizeOpenCodeCommand(command);
+  if (!isWindowsCommandShim(normalizedCommand)) {
+    return {
+      command: normalizedCommand,
+      args
+    };
+  }
+
+  return {
+    command: process.env.ComSpec || "cmd.exe",
+    args: ["/d", "/s", "/c", normalizedCommand, ...args]
+  };
 }
 
 async function runStepAgent(options = {}) {
@@ -4024,9 +4045,11 @@ module.exports = {
     getOllamaStartEnv,
     getRequiredOllamaModels,
     getOpenCodeRunArgs,
+    getOpenCodeProcessInvocation,
     getProviderRuntimeState,
     isQuotaOrRateLimitError,
     normalizeGatewayModelName,
+    normalizeOpenCodeCommand,
     normalizeOllamaCommand,
     normalizeOllamaApiModel,
     normalizeChatStore,
