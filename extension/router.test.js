@@ -31,10 +31,12 @@ const { _test } = require("./extension");
 
 const config = {
   localCoderModel: "ollama/qwen2.5-coder:3b",
-  openCodeModel: "ollama/qwen2.5-coder:3b"
+  openCodeModel: "ollama/qwen2.5-coder:3b",
+  stepAgentPlannerProvider: "auto"
 };
 const catalog = _test.buildProviderCatalog(config);
 const openCodeProvider = catalog.find((provider) => provider.id === "opencode");
+const stepAgentProvider = catalog.find((provider) => provider.id === "step-agent");
 
 function createProvider(configOverrides = {}) {
   const provider = new _test.FreeAiViewProvider({}, {
@@ -53,6 +55,10 @@ function createProvider(configOverrides = {}) {
     localCoderModel: "ollama/qwen2.5-coder:3b",
     openCodeModel: "ollama/qwen2.5-coder:3b",
     openCodeFallbackToOllama: true,
+    stepAgentPlannerProvider: "auto",
+    stepAgentMaxSteps: 5,
+    stepAgentRepairPasses: 1,
+    stepAgentStepMaxTokens: 900,
     ...configOverrides
   });
   return provider;
@@ -64,6 +70,8 @@ function nextTick() {
 
 assert.ok(openCodeProvider.enabled);
 assert.equal(openCodeProvider.model, "ollama/qwen2.5-coder:3b");
+assert.ok(stepAgentProvider.enabled);
+assert.match(stepAgentProvider.model, /planner:auto -> ollama\/qwen2\.5-coder:3b/);
 
 function route(input) {
   return _test.selectRoute({
@@ -79,10 +87,16 @@ function route(input) {
 assert.equal(route({ prompt: "Explain promises simply" }).mode, "Cheap");
 assert.equal(route({ prompt: "Explain promises simply" }).providers[0].id, "cerebras");
 assert.ok(!route({ prompt: "Explain promises simply" }).providers.some((provider) => provider.id === "gemini-fast"));
+assert.equal(route({ prompt: "Create a calculator app" }).mode, "Step Agent");
+assert.equal(route({ prompt: "Create a calculator app" }).providers[0].id, "step-agent");
+assert.equal(route({ prompt: "\u0441\u043e\u0437\u0434\u0430\u0439 \u043a\u0430\u043b\u044c\u043a\u0443\u043b\u044f\u0442\u043e\u0440" }).providers[0].id, "step-agent");
+assert.equal(route({ prompt: "Use step by step mode for a landing page" }).providers[0].id, "step-agent");
 const manualGeminiFast = route({ prompt: "Explain APIs", requestedProvider: "gemini-fast" });
 assert.equal(manualGeminiFast.providers[0].id, "gemini-fast");
 assert.equal(manualGeminiFast.providers[1].id, "ollama");
 assert.equal(route({ prompt: "Explain APIs", requestedProvider: "ollama" }).providers.length, 1);
+assert.equal(route({ prompt: "anything", requestedProvider: "step-agent" }).mode, "Step Agent");
+assert.equal(route({ prompt: "anything", requestedProvider: "step-agent" }).providers[0].id, "step-agent");
 
 assert.equal(route({ prompt: "проверь весь проект" }).mode, "Agent");
 assert.equal(route({ prompt: "проверь весь проект" }).providers[0].id, "opencode");
@@ -171,8 +185,12 @@ assert.equal(_test.getProviderRuntimeState({ id: "ollama", role: "local-fallback
 assert.equal(_test.providerUsesGateway({ id: "cerebras", model: "cerebras/gpt-oss-120b" }, {}), true);
 assert.equal(_test.providerUsesGateway({ id: "gemma", model: "ollama/gemma3:4b" }, {}), false);
 assert.equal(_test.providerUsesGateway(openCodeProvider, config), false);
+assert.equal(_test.providerUsesGateway(stepAgentProvider, config), true);
 assert.equal(_test.providerUsesOllama(openCodeProvider, config), true);
+assert.equal(_test.providerUsesOllama(stepAgentProvider, config), true);
 assert.equal(_test.providerRequiresOllama(openCodeProvider, config), true);
+assert.equal(_test.providerRequiresOllama(stepAgentProvider, config), true);
+assert.deepEqual(_test.getProviderOllamaModels(stepAgentProvider, config), ["qwen2.5-coder:3b"]);
 assert.deepEqual(_test.getOpenCodeRunArgs("hello", "ollama/qwen2.5-coder:3b"), [
   "run",
   "hello",
@@ -186,6 +204,34 @@ assert.equal(_test.parseOpenCodeRunOutput([
   JSON.stringify({ type: "text", part: { type: "text", text: "Hel" } }),
   JSON.stringify({ type: "text", part: { type: "text", text: "lo" } })
 ].join("\n")), "Hello");
+
+const parsedStepPlan = _test.parseStepAgentPlan([
+  "```json",
+  JSON.stringify({
+    goal: "Build calculator",
+    steps: [
+      { title: "HTML", instruction: "Create controls", expected: "Buttons exist" },
+      { title: "Logic", instruction: "Add JS math", expected: "Operations work" },
+      { title: "Review", instruction: "Check edge cases", expected: "No obvious bugs" }
+    ],
+    verification: ["Calculator can add", "Calculator can clear"]
+  }),
+  "```"
+].join("\n"), 2);
+assert.equal(parsedStepPlan.steps.length, 2);
+assert.equal(parsedStepPlan.steps[0].title, "HTML");
+assert.deepEqual(parsedStepPlan.verification, ["Calculator can add", "Calculator can clear"]);
+
+const fallbackStepPlan = _test.createFallbackStepAgentPlan("Create a calculator", 3);
+assert.equal(fallbackStepPlan.steps.length, 3);
+assert.match(_test.buildStepAgentPlanPrompt("Create a calculator", 4), /Return JSON only/);
+assert.match(_test.buildStepAgentWorkerPrompt({
+  userPrompt: "Create a calculator",
+  plan: fallbackStepPlan,
+  step: fallbackStepPlan.steps[0],
+  stepIndex: 0,
+  previousResults: []
+}), /Current step 1/);
 
 const firstChat = _test.createChatRecord("New chat", [
   { role: "user", text: "My name is Anuar", timestamp: "2026-06-15T10:00:00.000Z" },
@@ -693,8 +739,68 @@ async function runOllamaAutoStartTests() {
   assert.equal(concurrentProvider.ollamaStartPromise, null);
 }
 
+async function runStepAgentTests() {
+  const statuses = [];
+  const workerPrompts = [];
+  const result = await _test.runStepAgent({
+    userPrompt: "Create a calculator app",
+    planner: { id: "cerebras", label: "Cerebras" },
+    workerModel: "ollama/qwen2.5-coder:3b",
+    maxSteps: 3,
+    repairPasses: 1,
+    stepMaxTokens: 500,
+    askPlanner: async () => JSON.stringify({
+      goal: "Create a calculator app",
+      steps: [
+        { title: "Markup", instruction: "Create the calculator UI", expected: "UI is complete" },
+        { title: "Logic", instruction: "Add arithmetic behavior", expected: "Buttons calculate results" }
+      ],
+      verification: ["Addition works"]
+    }),
+    askWorker: async (prompt) => {
+      workerPrompts.push(prompt);
+      if (/verifying/i.test(prompt)) {
+        return "VERDICT: PASS\nThe calculator flow is consistent.";
+      }
+      return `Output for ${workerPrompts.length}`;
+    },
+    onStatus: (text) => statuses.push(text)
+  });
+
+  assert.match(result, /Planner: Cerebras/);
+  assert.match(result, /Step 1: Markup/);
+  assert.match(result, /Verification:/);
+  assert.equal(workerPrompts.length, 3);
+  assert.ok(statuses.some((status) => /step 1\/2/i.test(status)));
+
+  const fallbackResult = await _test.runStepAgent({
+    userPrompt: "Create a calculator app",
+    planner: { id: "cerebras", label: "Cerebras" },
+    workerModel: "ollama/qwen2.5-coder:3b",
+    maxSteps: 2,
+    repairPasses: 0,
+    stepMaxTokens: 500,
+    askPlanner: async () => {
+      throw new Error("429");
+    },
+    askWorker: async (prompt) => /verifying/i.test(prompt)
+      ? "VERDICT: PASS"
+      : "fallback worker output"
+  });
+  assert.match(fallbackResult, /Planner: fallback plan/);
+  assert.match(fallbackResult, /Planner fallback reason: 429/);
+
+  const smoke = await _test.testProviderAvailability({
+    ...config,
+    localCoderModel: "ollama/qwen2.5-coder:3b",
+    requestTimeoutMs: 1000
+  }, stepAgentProvider);
+  assert.match(smoke, /Step Agent configured/);
+}
+
 (async () => {
   await runOllamaAutoStartTests();
+  await runStepAgentTests();
 
   const confirmFirstChat = _test.createChatRecord("Confirm delete", []);
   const confirmSecondChat = _test.createChatRecord("Keep chat", []);

@@ -123,6 +123,7 @@
           "default": "auto",
           "enum": [
             "auto",
+            "step-agent",
             "opencode",
             "cerebras",
             "gemini",
@@ -133,6 +134,42 @@
             "ollama"
           ],
           "description": "Default provider for Free AI Console."
+        },
+        "freeAiConsole.stepAgentPlannerProvider": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "cerebras",
+            "gemini",
+            "gemini-fast",
+            "groq",
+            "openrouter",
+            "ollama",
+            "gemma"
+          ],
+          "description": "Planner provider used by Step Agent before local Ollama executes small steps."
+        },
+        "freeAiConsole.stepAgentMaxSteps": {
+          "type": "number",
+          "default": 5,
+          "minimum": 2,
+          "maximum": 10,
+          "description": "Maximum number of small Ollama steps Step Agent may run for one request."
+        },
+        "freeAiConsole.stepAgentRepairPasses": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "How many short repair passes Step Agent may run after verification finds issues."
+        },
+        "freeAiConsole.stepAgentStepMaxTokens": {
+          "type": "number",
+          "default": 900,
+          "minimum": 200,
+          "maximum": 3000,
+          "description": "Maximum output tokens for each local Ollama Step Agent step."
         },
         "freeAiConsole.freePolicy": {
           "type": "string",

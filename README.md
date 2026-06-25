@@ -18,8 +18,9 @@ http://127.0.0.1:8082
 ## What It Does
 
 - Adds a separate **Free AI** panel inside VS Code.
-- Lets you choose provider: Auto, OpenCode Agent, Cerebras, Gemini, Groq, OpenRouter, Ollama.
+- Lets you choose provider: Auto, Step Agent, OpenCode Agent, Cerebras, Gemini, Groq, OpenRouter, Ollama.
 - Uses quota-aware routing with cooldowns and local Ollama fallback.
+- Adds **Step Agent** mode for build-style requests like "create a calculator": a free planner creates small steps, local Ollama executes them one by one, and the result is verified before it is shown.
 - Starts the local `free-claude-code` gateway automatically when the panel opens.
 - Shows gateway health and manual Start/Check controls inside the Free AI panel.
 - Opens local Odysseus Chat from VS Code with the **Odysseus** button or command.
@@ -216,6 +217,7 @@ Auto mode is quota-aware and keeps Gemini out of automatic routing:
 
 ```text
 balanced simple requests -> Cerebras/Groq/OpenRouter candidate, then Ollama fallback
+build-style requests like create/build calculator/app/site -> Step Agent
 compare mode -> several non-Gemini cloud providers
 project / file editing / codebase review requests -> OpenCode Agent
 gemma -> Gemma Local
@@ -226,6 +228,29 @@ survival mode -> Gemma Local first
 Gemini and Gemini Fast remain available as manual choices, but Auto avoids them to preserve their small free quota. If a provider returns quota/rate-limit errors, Free AI Console puts it in cooldown and avoids it temporarily. The gateway has one active model at a time, so compare mode runs providers sequentially.
 
 OpenCode Agent is available as a separate provider and is also selected automatically for requests that ask to check the project, edit files, fix code, or refactor. If OpenCode's cloud/gateway model is rate-limited, it can retry through local Ollama.
+
+## Step Agent
+
+Step Agent is for prompts that are too big or too vague for one local Ollama call:
+
+```text
+User prompt
+  -> free planner provider creates a small JSON plan
+  -> local Ollama runs each step with a short prompt
+  -> local Ollama verifies the combined result
+  -> one repair pass runs if verification finds a bug or missing requirement
+```
+
+It is selected automatically for build-style requests such as "create a calculator app" or can be selected manually from the provider dropdown. If the planner provider is rate-limited, Step Agent falls back to a simple built-in plan and still uses local Ollama for the worker steps.
+
+Useful settings:
+
+```json
+"freeAiConsole.stepAgentPlannerProvider": "auto",
+"freeAiConsole.stepAgentMaxSteps": 5,
+"freeAiConsole.stepAgentRepairPasses": 1,
+"freeAiConsole.stepAgentStepMaxTokens": 900
+```
 
 ## Provider Tools
 

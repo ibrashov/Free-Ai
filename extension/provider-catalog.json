@@ -62,6 +62,18 @@
     "enabled": true
   },
   {
+    "id": "step-agent",
+    "label": "Step Agent",
+    "model": "planner+ollama/qwen2.5-coder:3b",
+    "role": "step-agent",
+    "costTier": "mixed-free",
+    "quotaType": "planner-plus-local",
+    "supportsTools": false,
+    "supportsOpenCode": false,
+    "priority": 45,
+    "enabled": true
+  },
+  {
     "id": "opencode",
     "label": "OpenCode Agent",
     "model": "ollama/qwen2.5-coder:3b",

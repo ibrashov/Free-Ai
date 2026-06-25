@@ -8,6 +8,7 @@ const providerCatalog = require("./provider-catalog.json");
 const execFileAsync = promisify(execFile);
 
 const OPENCODE_PROVIDER = "opencode";
+const STEP_AGENT_PROVIDER = "step-agent";
 const DEFAULT_LOCAL_CODER_MODEL = "ollama/qwen2.5-coder:3b";
 const OPENCODE_MODEL = DEFAULT_LOCAL_CODER_MODEL;
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
@@ -26,6 +27,9 @@ const DISCOVERY_FILE = "provider-candidates.json";
 const CHATS_FILE = "chats.json";
 const CHAT_CONTEXT_MESSAGE_LIMIT = 16;
 const CHAT_CONTEXT_CHAR_LIMIT = 24000;
+const STEP_AGENT_PLAN_MAX_TOKENS = 700;
+const STEP_AGENT_VERIFY_MAX_TOKENS = 700;
+const STEP_AGENT_DEFAULT_STEP_TOKENS = 900;
 
 function activate(context) {
   const provider = new FreeAiViewProvider(context.extensionUri, context);
@@ -424,6 +428,8 @@ class FreeAiViewProvider {
                 models: [model]
               })
             })
+            : selectedProvider.id === STEP_AGENT_PROVIDER
+              ? await this.askStepAgent(text, config)
             : await askFreeProvider(config, selectedProvider, text);
           if (!String(answer || "").trim()) {
             throw new Error("empty response");
@@ -739,6 +745,10 @@ class FreeAiViewProvider {
       defaultProvider: config.get("defaultProvider", "auto"),
       autoMode: config.get("autoMode", "balanced"),
       freePolicy: config.get("freePolicy", "no-card"),
+      stepAgentPlannerProvider: config.get("stepAgentPlannerProvider", "auto"),
+      stepAgentMaxSteps: clampInteger(config.get("stepAgentMaxSteps", 5), 2, 10),
+      stepAgentRepairPasses: clampInteger(config.get("stepAgentRepairPasses", 1), 0, 2),
+      stepAgentStepMaxTokens: clampInteger(config.get("stepAgentStepMaxTokens", STEP_AGENT_DEFAULT_STEP_TOKENS), 200, 3000),
       openCodeCommand: config.get("openCodeCommand", getDefaultOpenCodeCommand()),
       openCodeModel: config.get("openCodeModel", OPENCODE_MODEL),
       openCodeFallbackToOllama: config.get("openCodeFallbackToOllama", true),
@@ -790,7 +800,11 @@ class FreeAiViewProvider {
   getProviderStatusLines(config = this.getConfig()) {
     return this.getCatalog(config).map((provider) => {
       const state = getProviderRuntimeState(provider, this.providerState);
-      const model = provider.id === "ollama" ? config.localCoderModel : provider.model;
+      const model = provider.id === "ollama"
+        ? config.localCoderModel
+        : provider.id === STEP_AGENT_PROVIDER
+          ? `planner:${config.stepAgentPlannerProvider || "auto"} -> ${config.localCoderModel || DEFAULT_LOCAL_CODER_MODEL}`
+          : provider.model;
       const until = state.cooldownUntil > Date.now()
         ? ` until ${new Date(state.cooldownUntil).toLocaleTimeString()}`
         : "";
@@ -864,6 +878,73 @@ class FreeAiViewProvider {
     const text = `Found ${result.candidates.length} candidate model(s). Stored locally as ${DISCOVERY_FILE}. Candidates are not enabled until tested.`;
     vscode.window.showInformationMessage(text);
     this.post({ type: "answer", text, edits: [] });
+  }
+
+  async askStepAgent(prompt, config = this.getConfig()) {
+    const catalog = this.getCatalog(config);
+    const planner = selectStepAgentPlannerProvider({
+      config,
+      catalog,
+      providerState: this.providerState
+    });
+    const localModel = config.localCoderModel || DEFAULT_LOCAL_CODER_MODEL;
+
+    const ollama = await this.ensureOllamaRunning({
+      force: false,
+      showMessage: false,
+      models: [localModel]
+    });
+    if (ollama.state !== "ready") {
+      throw new Error(`${ollama.text}${ollama.detail ? `: ${ollama.detail}` : ""}`);
+    }
+
+    if (planner && providerUsesGateway(planner, config)) {
+      const gateway = await this.ensureGatewayRunning({ force: false, showMessage: false });
+      if (gateway.state !== "ready") {
+        throw new Error(`${gateway.text}${gateway.detail ? `: ${gateway.detail}` : ""}`);
+      }
+    }
+
+    if (planner && providerRequiresOllama(planner, config)) {
+      const plannerOllama = await this.ensureOllamaRunning({
+        force: false,
+        showMessage: false,
+        models: getProviderOllamaModels(planner, config)
+      });
+      if (plannerOllama.state !== "ready") {
+        throw new Error(`${plannerOllama.text}${plannerOllama.detail ? `: ${plannerOllama.detail}` : ""}`);
+      }
+    }
+
+    return runStepAgent({
+      userPrompt: prompt,
+      planner,
+      workerModel: localModel,
+      maxSteps: config.stepAgentMaxSteps,
+      repairPasses: config.stepAgentRepairPasses,
+      stepMaxTokens: config.stepAgentStepMaxTokens,
+      askPlanner: async (plannerPrompt) => {
+        if (!planner) {
+          throw new Error("No planner provider is available.");
+        }
+        try {
+          const answer = await askFreeProvider(config, planner, plannerPrompt, STEP_AGENT_PLAN_MAX_TOKENS);
+          await this.markProviderReady(planner.id);
+          return answer;
+        } catch (error) {
+          await this.markProviderFailure(planner.id, error, config.providerCooldownMinutes);
+          throw error;
+        }
+      },
+      askWorker: (workerPrompt, maxTokens) => askOllamaDirect(
+        config.ollamaUrl || DEFAULT_OLLAMA_URL,
+        localModel,
+        workerPrompt,
+        maxTokens,
+        config.requestTimeoutMs || DEFAULT_REQUEST_TIMEOUT_MS
+      ),
+      onStatus: (text) => this.post({ type: "status", text })
+    });
   }
 
   async pickFilesForPrompt() {
@@ -1369,6 +1450,7 @@ class FreeAiViewProvider {
     <div class="toolbar-left">
       <select id="provider" aria-label="Provider">
         ${providerOption("auto", "Auto - multi AI", defaultProvider)}
+        ${providerOption("step-agent", "Step Agent", defaultProvider)}
         ${providerOption("opencode", "OpenCode Agent", defaultProvider)}
         ${providerOption("cerebras", "Cerebras", defaultProvider)}
         ${providerOption("gemini", "Gemini", defaultProvider)}
@@ -2191,6 +2273,21 @@ function getProviderOllamaModels(provider, config = {}) {
     return models;
   }
 
+  if (provider.id === STEP_AGENT_PROVIDER) {
+    addRequiredOllamaModel(models, config.localCoderModel || DEFAULT_LOCAL_CODER_MODEL);
+    const planner = selectStepAgentPlannerProvider({
+      config,
+      catalog: buildProviderCatalog(config),
+      providerState: {}
+    });
+    if (planner && planner.id !== STEP_AGENT_PROVIDER) {
+      for (const model of getProviderOllamaModels(planner, config)) {
+        addRequiredOllamaModel(models, model);
+      }
+    }
+    return models;
+  }
+
   const selectedModel = provider.id === OPENCODE_PROVIDER
     ? (config.openCodeModel || provider.model || OPENCODE_MODEL)
     : provider.id === "ollama"
@@ -2445,6 +2542,16 @@ async function testProviderAvailability(config, provider) {
     return `${normalizeOpenCodeCommand(config.openCodeCommand)} configured with ${local}; chat smoke test skipped`;
   }
 
+  if (provider.id === STEP_AGENT_PROVIDER) {
+    const planner = selectStepAgentPlannerProvider({
+      config,
+      catalog: buildProviderCatalog(config),
+      providerState: {}
+    });
+    const plannerLabel = planner?.label || "fallback planner";
+    return `Step Agent configured: ${plannerLabel} planner -> ${config.localCoderModel || DEFAULT_LOCAL_CODER_MODEL} worker; multi-step smoke test skipped`;
+  }
+
   const gatewayProviderId = getGatewayProviderTestId(provider);
   if (gatewayProviderId) {
     return testGatewayProviderAvailability(config, gatewayProviderId, provider);
@@ -2659,6 +2766,423 @@ function getOpenCodeRunArgs(prompt, model) {
   return ["run", String(prompt || ""), "-m", model || OPENCODE_MODEL, "--format", "json"];
 }
 
+async function runStepAgent(options = {}) {
+  const userPrompt = String(options.userPrompt || "").trim();
+  const maxSteps = clampInteger(options.maxSteps, 2, 10);
+  const repairPasses = clampInteger(options.repairPasses, 0, 2);
+  const stepMaxTokens = clampInteger(options.stepMaxTokens, 200, 3000);
+  const workerModel = options.workerModel || DEFAULT_LOCAL_CODER_MODEL;
+  const onStatus = typeof options.onStatus === "function" ? options.onStatus : () => {};
+  const plannerLabel = options.planner?.label || formatProviderName(options.planner?.id) || "Fallback planner";
+
+  if (!userPrompt) {
+    throw new Error("Step Agent needs a prompt.");
+  }
+  if (typeof options.askWorker !== "function") {
+    throw new Error("Step Agent needs a local Ollama worker.");
+  }
+
+  let rawPlan = "";
+  let planError = "";
+  if (typeof options.askPlanner === "function") {
+    try {
+      onStatus("Step Agent: planning small Ollama steps...");
+      rawPlan = await options.askPlanner(buildStepAgentPlanPrompt(userPrompt, maxSteps));
+    } catch (error) {
+      planError = getErrorMessage(error);
+    }
+  }
+
+  const parsedPlan = parseStepAgentPlan(rawPlan, maxSteps);
+  const plan = parsedPlan || createFallbackStepAgentPlan(userPrompt, maxSteps);
+  const planSource = parsedPlan ? plannerLabel : "fallback plan";
+  const stepResults = [];
+
+  for (let index = 0; index < plan.steps.length; index += 1) {
+    const step = plan.steps[index];
+    onStatus(`Step Agent: step ${index + 1}/${plan.steps.length} - ${step.title}...`);
+    try {
+      const output = await options.askWorker(
+        buildStepAgentWorkerPrompt({
+          userPrompt,
+          plan,
+          step,
+          stepIndex: index,
+          previousResults: stepResults
+        }),
+        stepMaxTokens
+      );
+      stepResults.push({
+        title: step.title,
+        output: String(output || "").trim() || "(empty step output)",
+        error: ""
+      });
+    } catch (error) {
+      stepResults.push({
+        title: step.title,
+        output: "",
+        error: getErrorMessage(error)
+      });
+      break;
+    }
+  }
+
+  let verification = "";
+  const hadStepError = stepResults.some((result) => result.error);
+  if (!hadStepError && stepResults.length > 0) {
+    try {
+      onStatus("Step Agent: verifying the step results...");
+      verification = await options.askWorker(
+        buildStepAgentVerificationPrompt({ userPrompt, plan, stepResults }),
+        STEP_AGENT_VERIFY_MAX_TOKENS
+      );
+    } catch (error) {
+      verification = `VERDICT: NEEDS_FIX\nVerification failed: ${getErrorMessage(error)}`;
+    }
+  }
+
+  const repairs = [];
+  if (!hadStepError && shouldRunStepAgentRepair(verification)) {
+    for (let pass = 0; pass < repairPasses; pass += 1) {
+      try {
+        onStatus(`Step Agent: repair pass ${pass + 1}/${repairPasses}...`);
+        const repair = await options.askWorker(
+          buildStepAgentRepairPrompt({
+            userPrompt,
+            plan,
+            stepResults,
+            verification,
+            pass
+          }),
+          stepMaxTokens
+        );
+        repairs.push(String(repair || "").trim());
+        break;
+      } catch (error) {
+        repairs.push(`Repair pass failed: ${getErrorMessage(error)}`);
+        break;
+      }
+    }
+  }
+
+  return formatStepAgentResult({
+    plan,
+    planSource,
+    plannerLabel,
+    planError,
+    workerModel,
+    stepResults,
+    verification,
+    repairs
+  });
+}
+
+function buildStepAgentPlanPrompt(userPrompt, maxSteps) {
+  return [
+    "You are a planner for a VS Code chat extension.",
+    "Break the user's request into small, ordered tasks for a local Ollama worker.",
+    `Return JSON only, with at most ${maxSteps} steps.`,
+    "Schema:",
+    '{"goal":"short goal","steps":[{"title":"short title","instruction":"specific worker instruction","expected":"what should be true after this step"}],"verification":["checks to run mentally after the steps"]}',
+    "Rules:",
+    "- Keep every step small enough for a weak local model.",
+    "- Do not ask the worker to read the whole project unless the user attached or named files.",
+    "- If file edits are requested, remind the worker to return complete replacements in the provided edit block format.",
+    "- Prefer useful progress over a perfect giant answer.",
+    "",
+    "User request:",
+    userPrompt
+  ].join("\n");
+}
+
+function parseStepAgentPlan(raw, maxSteps) {
+  const jsonText = extractJsonObjectText(raw);
+  if (!jsonText) {
+    return null;
+  }
+  try {
+    return normalizeStepAgentPlan(JSON.parse(jsonText), maxSteps);
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonObjectText(raw) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1].trim() : text;
+  if (candidate.startsWith("{") && candidate.endsWith("}")) {
+    return candidate;
+  }
+
+  const start = candidate.indexOf("{");
+  const end = candidate.lastIndexOf("}");
+  if (start === -1 || end <= start) {
+    return "";
+  }
+  return candidate.slice(start, end + 1);
+}
+
+function normalizeStepAgentPlan(value, maxSteps) {
+  const limit = clampInteger(maxSteps, 2, 10);
+  const rawSteps = Array.isArray(value?.steps) ? value.steps : [];
+  const steps = rawSteps
+    .map((step, index) => normalizeStepAgentStep(step, index))
+    .filter((step) => step.instruction)
+    .slice(0, limit);
+
+  if (steps.length === 0) {
+    return null;
+  }
+
+  return {
+    goal: clipText(value?.goal || "Complete the user request step by step.", 400),
+    steps,
+    verification: normalizeStringList(value?.verification).slice(0, 6)
+  };
+}
+
+function normalizeStepAgentStep(step, index) {
+  if (typeof step === "string") {
+    return {
+      title: `Step ${index + 1}`,
+      instruction: clipText(step, 1200),
+      expected: ""
+    };
+  }
+
+  const title = clipText(step?.title || step?.name || `Step ${index + 1}`, 80);
+  const instruction = clipText(step?.instruction || step?.task || step?.prompt || step?.description || "", 1200);
+  const expected = clipText(step?.expected || step?.result || step?.doneWhen || "", 400);
+  return {
+    title: title || `Step ${index + 1}`,
+    instruction,
+    expected
+  };
+}
+
+function normalizeStringList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => clipText(item, 300)).filter(Boolean);
+  }
+  const text = String(value || "").trim();
+  return text ? [clipText(text, 300)] : [];
+}
+
+function createFallbackStepAgentPlan(userPrompt, maxSteps) {
+  const steps = [
+    {
+      title: "Understand the request",
+      instruction: "Restate the concrete deliverable, constraints, and the smallest useful output for the user request.",
+      expected: "The worker knows exactly what must be produced."
+    },
+    {
+      title: "Draft the solution",
+      instruction: "Create the main answer or implementation in a compact form. If code is needed, produce complete runnable snippets instead of vague advice.",
+      expected: "A first complete solution exists."
+    },
+    {
+      title: "Check for bugs",
+      instruction: "Review the draft for missing requirements, syntax mistakes, runtime problems, and usability issues. Point out fixes or produce corrected content.",
+      expected: "Obvious defects are found and corrected."
+    },
+    {
+      title: "Final assembly",
+      instruction: "Combine the corrected work into the final response the user can use.",
+      expected: "The final answer is coherent and complete."
+    }
+  ].slice(0, clampInteger(maxSteps, 2, 10));
+
+  return {
+    goal: clipText(`Complete this request without one giant Ollama prompt: ${userPrompt}`, 400),
+    steps,
+    verification: [
+      "The final answer satisfies the original request.",
+      "No step contradicts an earlier step.",
+      "Code, if present, is complete enough to run or paste."
+    ]
+  };
+}
+
+function buildStepAgentWorkerPrompt(options = {}) {
+  const previous = formatPreviousStepResults(options.previousResults || []);
+  const step = options.step || {};
+  return [
+    "You are the local Ollama worker inside a step-by-step agent loop.",
+    "Work only on the current step. Keep the answer focused and avoid repeating the whole conversation.",
+    "If the user asks for file edits, return COMPLETE replacement content only inside this exact block:",
+    '<free_ai_file_edits><file path="exact attached file path">complete new file content</file></free_ai_file_edits>',
+    "Do not claim that files were applied; VS Code will ask the user to confirm.",
+    "",
+    "Original user request:",
+    options.userPrompt || "",
+    "",
+    "Overall goal:",
+    options.plan?.goal || "",
+    "",
+    previous ? `Previous step results:\n${previous}\n` : "Previous step results:\n(none)\n",
+    `Current step ${Number(options.stepIndex || 0) + 1}: ${step.title || "Step"}`,
+    step.instruction || "",
+    step.expected ? `Expected result: ${step.expected}` : "",
+    "",
+    "Return the useful work for this step. If you find a bug or missing requirement, explain the cause and the fix."
+  ].filter((part) => part !== "").join("\n");
+}
+
+function formatPreviousStepResults(results) {
+  return (Array.isArray(results) ? results : [])
+    .map((result, index) => {
+      const body = result.error
+        ? `ERROR: ${result.error}`
+        : clipText(result.output || "", 1800);
+      return `Step ${index + 1} - ${result.title || "result"}:\n${body}`;
+    })
+    .join("\n\n");
+}
+
+function buildStepAgentVerificationPrompt(options = {}) {
+  return [
+    "You are verifying a step-by-step local Ollama result.",
+    "Look for missing requirements, contradictions, syntax/runtime bugs, and unclear final output.",
+    "Start with exactly one verdict line: VERDICT: PASS or VERDICT: NEEDS_FIX.",
+    "If it needs fixing, explain the root cause and the smallest repair.",
+    "",
+    "Original user request:",
+    options.userPrompt || "",
+    "",
+    "Plan:",
+    formatStepAgentPlan(options.plan),
+    "",
+    "Step outputs:",
+    formatPreviousStepResults(options.stepResults || [])
+  ].join("\n");
+}
+
+function buildStepAgentRepairPrompt(options = {}) {
+  return [
+    "The verifier found issues in the step-by-step result.",
+    "Produce the corrected final answer now. Keep it concise but complete.",
+    "If file edits are needed, use the exact <free_ai_file_edits> format and complete replacement content.",
+    "",
+    "Original user request:",
+    options.userPrompt || "",
+    "",
+    "Plan:",
+    formatStepAgentPlan(options.plan),
+    "",
+    "Previous step outputs:",
+    formatPreviousStepResults(options.stepResults || []),
+    "",
+    "Verifier feedback:",
+    options.verification || ""
+  ].join("\n");
+}
+
+function shouldRunStepAgentRepair(verification) {
+  const text = String(verification || "");
+  if (/VERDICT:\s*PASS/i.test(text)) {
+    return false;
+  }
+  return /VERDICT:\s*NEEDS_FIX|needs[_ -]?fix|bug|error|missing|fail/i.test(text);
+}
+
+function formatStepAgentResult(result = {}) {
+  const parts = [
+    `Planner: ${result.planSource || result.plannerLabel || "fallback plan"}`,
+    `Worker: ${result.workerModel || DEFAULT_LOCAL_CODER_MODEL}`,
+    ""
+  ];
+
+  if (result.planError) {
+    parts.push(`Planner fallback reason: ${result.planError}`, "");
+  }
+
+  parts.push("Plan:");
+  parts.push(formatStepAgentPlan(result.plan));
+  parts.push("");
+
+  for (const [index, step] of (result.stepResults || []).entries()) {
+    parts.push(`Step ${index + 1}: ${step.title || "Step"}`);
+    if (step.error) {
+      parts.push(`Step failed: ${step.error}`);
+      break;
+    }
+    parts.push(clipText(step.output || "(empty step output)", 8000));
+    parts.push("");
+  }
+
+  if (result.verification) {
+    parts.push("Verification:");
+    parts.push(clipText(result.verification, 3000));
+    parts.push("");
+  }
+
+  for (const [index, repair] of (result.repairs || []).entries()) {
+    parts.push(`Repair pass ${index + 1}:`);
+    parts.push(clipText(repair || "(empty repair output)", 8000));
+    parts.push("");
+  }
+
+  return parts.join("\n").trim();
+}
+
+function formatStepAgentPlan(plan = {}) {
+  const lines = [];
+  if (plan.goal) {
+    lines.push(`Goal: ${plan.goal}`);
+  }
+  for (const [index, step] of (plan.steps || []).entries()) {
+    const expected = step.expected ? ` Expected: ${step.expected}` : "";
+    lines.push(`${index + 1}. ${step.title}: ${step.instruction}${expected}`);
+  }
+  if (Array.isArray(plan.verification) && plan.verification.length > 0) {
+    lines.push(`Checks: ${plan.verification.join("; ")}`);
+  }
+  return lines.join("\n");
+}
+
+function selectStepAgentPlannerProvider(options = {}) {
+  const config = options.config || {};
+  const catalog = Array.isArray(options.catalog) ? options.catalog : buildProviderCatalog(config);
+  const requested = String(config.stepAgentPlannerProvider || "auto").trim();
+  const enabled = catalog.filter((provider) => provider.enabled !== false);
+
+  if (requested && requested !== "auto") {
+    const manual = catalog.find((provider) => provider.id === requested && provider.id !== STEP_AGENT_PROVIDER);
+    if (manual) {
+      return manual;
+    }
+  }
+
+  const primary = firstReadyProviders(
+    getAutoChatProviders(enabled).filter((provider) => provider.id !== STEP_AGENT_PROVIDER),
+    options.providerState || {},
+    1
+  )[0];
+  return primary || getPreferredLocalProvider(catalog);
+}
+
+function clipText(value, maxLength) {
+  const text = String(value || "").trim();
+  const limit = Math.max(1, Number(maxLength) || 1);
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit - 3).trim()}...`;
+}
+
+function clampInteger(value, min, max) {
+  const number = Math.round(Number(value));
+  if (!Number.isFinite(number)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, number));
+}
+
 function selectProviders(prompt, requestedProvider) {
   if (requestedProvider && requestedProvider !== "auto") {
     return [requestedProvider];
@@ -2704,7 +3228,7 @@ function selectRoute(options) {
       providers.push(localProvider);
     }
     return {
-      mode: manualProvider?.role === "agent" ? "Agent" : manualProvider?.role === "local-fallback" ? "Local" : "Manual",
+      mode: manualProvider?.id === STEP_AGENT_PROVIDER ? "Step Agent" : manualProvider?.role === "agent" ? "Agent" : manualProvider?.role === "local-fallback" ? "Local" : "Manual",
       reason: manualProvider?.role === "chat" ? "Manual provider selection with local fallback" : "Manual provider selection",
       providers,
       compare: false
@@ -2733,6 +3257,16 @@ function selectRoute(options) {
   }
 
   const intent = classifyPrompt(prompt, hasReferencedFiles);
+  if (intent.stepAgent) {
+    const stepProvider = catalog.find((provider) => provider.id === STEP_AGENT_PROVIDER);
+    return {
+      mode: "Step Agent",
+      reason: intent.reason,
+      providers: stepProvider ? [stepProvider] : localProvider ? [localProvider] : [],
+      compare: false
+    };
+  }
+
   if (intent.agent) {
     const agentProvider = catalog.find((provider) => provider.role === "agent");
     return {
@@ -2781,6 +3315,7 @@ function selectRoute(options) {
 
 function classifyPrompt(prompt, hasReferencedFiles) {
   const text = String(prompt || "").toLowerCase();
+  const stepAgentIntent = hasStepAgentIntent(text);
   const cyrillicProjectWide = /(проект|кодбейс|репозит[оа]р|весь проект|всю папку|workspace)/i.test(text);
   const cyrillicEditIntent = /(исправ|измен|отредакт|рефактор|почин|добав|удал|перепиш)/i.test(text);
   const cyrillicLocalIntent = /(локально|офлайн|приват|без интернета|на ноуте)/i.test(text);
@@ -2788,18 +3323,40 @@ function classifyPrompt(prompt, hasReferencedFiles) {
   const editIntent = /(fix|edit|change|modify|refactor|apply|write|исправь|измени|отредактируй|рефактор|почини|добавь|удали|перепиши)/i.test(text);
   const localIntent = /(offline|local|private|privacy|ollama|gemma|локально|офлайн|приват|без интернета|на ноуте)/i.test(text);
 
-  if (projectWide || editIntent || cyrillicProjectWide || cyrillicEditIntent) {
+  if (projectWide || cyrillicProjectWide) {
     return {
       agent: true,
+      stepAgent: false,
       local: false,
       fileReview: false,
-      reason: projectWide || cyrillicProjectWide ? "Project-wide request needs OpenCode Agent" : "Edit/change request needs OpenCode Agent"
+      reason: "Project-wide request needs OpenCode Agent"
+    };
+  }
+
+  if (stepAgentIntent) {
+    return {
+      agent: false,
+      stepAgent: true,
+      local: false,
+      fileReview: false,
+      reason: "Build-style request is safer as small Ollama steps"
+    };
+  }
+
+  if (editIntent || cyrillicEditIntent) {
+    return {
+      agent: true,
+      stepAgent: false,
+      local: false,
+      fileReview: false,
+      reason: "Edit/change request needs OpenCode Agent"
     };
   }
 
   if (localIntent || cyrillicLocalIntent) {
     return {
       agent: false,
+      stepAgent: false,
       local: true,
       fileReview: false,
       reason: "Local/private/offline request"
@@ -2808,10 +3365,20 @@ function classifyPrompt(prompt, hasReferencedFiles) {
 
   return {
     agent: false,
+    stepAgent: false,
     local: false,
     fileReview: Boolean(hasReferencedFiles),
     reason: hasReferencedFiles ? "Named file context was auto-read" : "Simple chat request"
   };
+}
+
+function hasStepAgentIntent(text) {
+  const value = String(text || "").toLowerCase();
+  const explicit = /(step[-\s]?agent|step by step|small steps|orchestrator|planner)/i.test(value)
+    || /(?:\u043f\u043e\u0448\u0430\u0433|\u0430\u0433\u0435\u043d\u0442|\u043e\u0440\u043a\u0435\u0441\u0442\u0440|\u043f\u043b\u0430\u043d\u0438\u0440)/i.test(value);
+  const englishBuild = /(?:create|build|make|generate|write|implement|develop).{0,80}(?:calculator|app|website|page|component|script|tool|program|game)/i.test(value);
+  const russianBuild = /(?:\u0441\u043e\u0437\u0434\u0430|\u0441\u0434\u0435\u043b\u0430|\u043d\u0430\u043f\u0438\u0448|\u0440\u0430\u0437\u0440\u0430\u0431\u043e\u0442|\u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440).{0,80}(?:\u043a\u0430\u043b\u044c\u043a\u0443\u043b\u044f\u0442\u043e\u0440|\u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d|\u0441\u0430\u0439\u0442|\u0441\u0442\u0440\u0430\u043d\u0438\u0446|\u0441\u043a\u0440\u0438\u043f\u0442|\u0438\u043d\u0441\u0442\u0440\u0443\u043c\u0435\u043d\u0442|\u0438\u0433\u0440)/i.test(value);
+  return explicit || englishBuild || russianBuild;
 }
 
 function getPreferredLocalProvider(providers) {
@@ -2899,6 +3466,16 @@ function providerUsesGateway(provider, config = {}) {
   if (!provider) {
     return false;
   }
+  if (provider.id === STEP_AGENT_PROVIDER) {
+    const planner = selectStepAgentPlannerProvider({
+      config,
+      catalog: buildProviderCatalog(config),
+      providerState: {}
+    });
+    return planner && planner.id !== STEP_AGENT_PROVIDER
+      ? providerUsesGateway(planner, config)
+      : false;
+  }
   const model = provider.id === OPENCODE_PROVIDER
     ? (config.openCodeModel || provider.model)
     : provider.id === "ollama"
@@ -2910,6 +3487,9 @@ function providerUsesGateway(provider, config = {}) {
 function providerUsesOllama(provider, config = {}) {
   if (!provider) {
     return false;
+  }
+  if (provider.id === STEP_AGENT_PROVIDER) {
+    return true;
   }
   if (provider.id === OPENCODE_PROVIDER) {
     return String(config.openCodeModel || provider.model || "").startsWith("ollama/")
@@ -2924,6 +3504,9 @@ function providerUsesOllama(provider, config = {}) {
 function providerRequiresOllama(provider, config = {}) {
   if (!provider) {
     return false;
+  }
+  if (provider.id === STEP_AGENT_PROVIDER) {
+    return true;
   }
   const model = provider.id === OPENCODE_PROVIDER
     ? (config.openCodeModel || provider.model)
@@ -2945,6 +3528,12 @@ function buildProviderCatalog(config) {
       return {
         ...provider,
         model: config.openCodeModel || provider.model
+      };
+    }
+    if (provider.id === STEP_AGENT_PROVIDER) {
+      return {
+        ...provider,
+        model: `planner:${config.stepAgentPlannerProvider || "auto"} -> ${config.localCoderModel || DEFAULT_LOCAL_CODER_MODEL}`
       };
     }
     return { ...provider };
@@ -3417,11 +4006,16 @@ module.exports = {
   _test: {
     FreeAiViewProvider,
     appendConversationContext,
+    buildStepAgentPlanPrompt,
+    buildStepAgentVerificationPrompt,
+    buildStepAgentWorkerPrompt,
     buildProviderCatalog,
     classifyPrompt,
     createChatRecord,
     createChatTitle,
+    createFallbackStepAgentPlan,
     fetchWithTimeout,
+    formatStepAgentResult,
     formatFetchFailure,
     formatOllamaError,
     getAutoChatProviders,
@@ -3437,10 +4031,13 @@ module.exports = {
     normalizeOllamaApiModel,
     normalizeChatStore,
     normalizeProviderState,
+    parseStepAgentPlan,
     parseOpenCodeRunOutput,
     providerUsesGateway,
     providerUsesOllama,
     providerRequiresOllama,
+    runStepAgent,
+    selectStepAgentPlannerProvider,
     selectRoute,
     splitCommandLine,
     testProviderAvailability
