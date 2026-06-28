@@ -197,8 +197,8 @@
         },
         "freeAiConsole.openCodeModel": {
           "type": "string",
-          "default": "ollama/qwen2.5-coder:3b",
-          "description": "OpenCode model in provider/model format. The default runs locally through Ollama."
+          "default": "ollama/qwen3:8b",
+          "description": "OpenCode model in provider/model format. The default runs locally through Ollama with tool-call support for file edits."
         },
         "freeAiConsole.openCodeFallbackToOllama": {
           "type": "boolean",
