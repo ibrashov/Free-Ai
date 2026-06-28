@@ -31,7 +31,7 @@ const { _test } = require("./extension");
 
 const config = {
   localCoderModel: "ollama/qwen2.5-coder:3b",
-  openCodeModel: "ollama/qwen3:8b",
+  openCodeModel: "ollama/qwen2.5-coder:3b",
   stepAgentPlannerProvider: "auto"
 };
 const catalog = _test.buildProviderCatalog(config);
@@ -53,7 +53,7 @@ function createProvider(configOverrides = {}) {
     ollamaStartupTimeoutMs: 3000,
     ollamaUrl: "http://127.0.0.1:11434",
     localCoderModel: "ollama/qwen2.5-coder:3b",
-    openCodeModel: "ollama/qwen3:8b",
+    openCodeModel: "ollama/qwen2.5-coder:3b",
     openCodeFallbackToOllama: true,
     stepAgentPlannerProvider: "auto",
     stepAgentMaxSteps: 5,
@@ -69,7 +69,7 @@ function nextTick() {
 }
 
 assert.ok(openCodeProvider.enabled);
-assert.equal(openCodeProvider.model, "ollama/qwen3:8b");
+assert.equal(openCodeProvider.model, "ollama/qwen2.5-coder:3b");
 assert.ok(stepAgentProvider.enabled);
 assert.match(stepAgentProvider.model, /planner:auto -> ollama\/qwen2\.5-coder:3b/);
 
@@ -217,6 +217,36 @@ assert.equal(_test.parseOpenCodeRunOutput([
   JSON.stringify({ type: "text", part: { type: "text", text: "Hel" } }),
   JSON.stringify({ type: "text", part: { type: "text", text: "lo" } })
 ].join("\n")), "Hello");
+assert.deepEqual(_test.normalizeLocalAgentCommand(JSON.stringify({
+  action: "write_file",
+  path: "result.txt",
+  content: "OK"
+})), {
+  action: "write_file",
+  path: "result.txt",
+  content: "OK",
+  oldText: "",
+  newText: "",
+  answer: ""
+});
+assert.deepEqual(_test.normalizeLocalAgentCommand([
+  "```json",
+  JSON.stringify({
+    name: "write",
+    arguments: {
+      filePath: "./result.txt",
+      content: "OK"
+    }
+  }),
+  "```"
+].join("\n")), {
+  action: "write_file",
+  path: "./result.txt",
+  content: "OK",
+  oldText: "",
+  newText: "",
+  answer: ""
+});
 
 const parsedStepPlan = _test.parseStepAgentPlan([
   "```json",

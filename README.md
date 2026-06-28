@@ -227,7 +227,7 @@ survival mode -> Gemma Local first
 
 Gemini and Gemini Fast remain available as manual choices, but Auto avoids them to preserve their small free quota. If a provider returns quota/rate-limit errors, Free AI Console puts it in cooldown and avoids it temporarily. The gateway has one active model at a time, so compare mode runs providers sequentially.
 
-OpenCode Agent is available as a separate provider and is also selected automatically for requests that ask to check the project, edit files, fix code, or refactor. If OpenCode's cloud/gateway model is rate-limited, it can retry through local Ollama.
+OpenCode Agent is available as the project/file provider and is selected automatically for requests that ask to check the project, edit files, fix code, or refactor. When configured with an `ollama/...` model, it uses the built-in local Ollama file-agent path for workspace reads/writes/edits instead of waiting on the OpenCode CLI.
 
 ## Step Agent
 
@@ -368,6 +368,7 @@ Set the gateway and token in your User or Workspace settings (Settings UI or `se
 "freeAiConsole.defaultProvider": "auto",
 "freeAiConsole.autoMode": "balanced",
 "freeAiConsole.freePolicy": "no-card",
+"freeAiConsole.openCodeModel": "ollama/qwen2.5-coder:3b",
 "freeAiConsole.openCodeFallbackToOllama": true,
 "freeAiConsole.providerCooldownMinutes": 10,
 "freeAiConsole.localCoderModel": "ollama/qwen2.5-coder:3b"

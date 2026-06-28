@@ -20,7 +20,7 @@ These limits can change, so always trust the provider dashboards over this note.
 Ollama local
 - No API quota.
 - Limited by laptop speed, RAM, VRAM, and disk.
-- Current repaired model: qwen2.5-coder:3b in C:\OllamaModels.
+- Current repaired models include qwen2.5-coder:3b, qwen3:4b, and qwen3:8b in C:\OllamaModels.
 
 Cerebras gpt-oss-120b free trial
 - 5 RPM
@@ -46,7 +46,7 @@ Gemini API
 
 ## Why Ollama Matters
 
-OpenCode can consume cloud quota quickly because agent mode reads context and may do several internal steps. Ollama is the "survival" layer: slower, but it keeps working when free cloud providers hit limits.
+OpenCode Agent uses the local Ollama file-agent path for `ollama/...` models, so project edits can keep working without cloud quota. Ollama is the "survival" layer: slower than paid cloud models, but local and reusable.
 
 ## Repairing Ollama On Windows
 

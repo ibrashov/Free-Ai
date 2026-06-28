@@ -76,7 +76,7 @@
   {
     "id": "opencode",
     "label": "OpenCode Agent",
-    "model": "ollama/qwen3:8b",
+    "model": "ollama/qwen2.5-coder:3b",
     "role": "agent",
     "costTier": "local-free",
     "quotaType": "local-hardware",

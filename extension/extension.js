@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 const OPENCODE_PROVIDER = "opencode";
 const STEP_AGENT_PROVIDER = "step-agent";
 const DEFAULT_LOCAL_CODER_MODEL = "ollama/qwen2.5-coder:3b";
-const OPENCODE_MODEL = "ollama/qwen3:8b";
+const OPENCODE_MODEL = DEFAULT_LOCAL_CODER_MODEL;
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
 const DEFAULT_OLLAMA_COMMAND = "ollama serve";
 const DEFAULT_OLLAMA_MODELS_DIRECTORY = "C:\\OllamaModels";
@@ -419,6 +419,7 @@ class FreeAiViewProvider {
               command: config.openCodeCommand,
               model: config.openCodeModel,
               localModel: config.localCoderModel,
+              ollamaUrl: config.ollamaUrl,
               authToken: config.authToken,
               prompt: text,
               fallbackToOllama: config.openCodeFallbackToOllama,
@@ -2693,6 +2694,24 @@ async function askOpenCode(options) {
     throw new Error("OpenCode Agent needs an open workspace folder.");
   }
 
+  const selectedModel = model || OPENCODE_MODEL;
+  if (String(selectedModel || "").startsWith("ollama/")) {
+    const localAgentModel = normalizeOpenCodeOllamaModel(selectedModel);
+    if (typeof ensureOllama === "function") {
+      const ollama = await ensureOllama(localAgentModel);
+      if (ollama?.state !== "ready") {
+        throw new Error(`Local Ollama agent needs Ollama. ${ollama?.text || "Ollama is not ready"}${ollama?.detail ? `: ${ollama.detail}` : ""}`);
+      }
+    }
+    return runLocalOllamaFileAgent({
+      ollamaUrl: options.ollamaUrl || DEFAULT_OLLAMA_URL,
+      model: localAgentModel,
+      prompt,
+      cwd: workspaceFolder.uri.fsPath,
+      timeoutMs
+    });
+  }
+
   const agentPrompt = [
     "You are being called from the user's Free AI VS Code panel.",
     "Use a small context first. Read only files that are relevant to the user's request.",
@@ -2762,6 +2781,280 @@ async function runOpenCode(options) {
     throw new Error(text);
   }
   return text;
+}
+
+async function runLocalOllamaFileAgent(options = {}) {
+  const cwd = path.resolve(String(options.cwd || ""));
+  if (!cwd) {
+    throw new Error("Local Ollama agent needs a workspace folder.");
+  }
+
+  const model = normalizeOpenCodeOllamaModel(options.model || DEFAULT_LOCAL_CODER_MODEL);
+  const apiModel = normalizeOllamaApiModel(model);
+  const timeoutMs = options.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS;
+  const messages = [
+    {
+      role: "system",
+      content: buildLocalOllamaFileAgentSystemPrompt()
+    },
+    {
+      role: "user",
+      content: [
+        `Workspace root: ${cwd}`,
+        "User request:",
+        String(options.prompt || "")
+      ].join("\n")
+    }
+  ];
+  const observations = [];
+  const changes = [];
+  const maxSteps = 8;
+
+  for (let step = 0; step < maxSteps; step += 1) {
+    const raw = await askOllamaAgentJson({
+      ollamaUrl: options.ollamaUrl || DEFAULT_OLLAMA_URL,
+      apiModel,
+      messages,
+      timeoutMs
+    });
+    const command = normalizeLocalAgentCommand(raw);
+    messages.push({ role: "assistant", content: raw });
+
+    if (!command) {
+      const observation = "Could not parse a JSON command. Return exactly one JSON object with an action.";
+      observations.push(observation);
+      messages.push({ role: "user", content: observation });
+      continue;
+    }
+
+    if (command.action === "finish") {
+      return formatLocalAgentFinal(command.answer, changes, observations);
+    }
+
+    const observation = await executeLocalAgentCommand(command, cwd, changes);
+    observations.push(observation);
+    messages.push({ role: "user", content: observation });
+  }
+
+  return formatLocalAgentFinal("Stopped after the local agent step limit.", changes, observations);
+}
+
+function buildLocalOllamaFileAgentSystemPrompt() {
+  return [
+    "You are a local coding agent inside VS Code.",
+    "Return exactly one JSON object per message. Do not use markdown fences.",
+    "Available actions:",
+    '{"action":"list_files","path":"relative/dir"}',
+    '{"action":"read_file","path":"relative/file"}',
+    '{"action":"write_file","path":"relative/file","content":"complete file content"}',
+    '{"action":"replace_in_file","path":"relative/file","oldText":"exact text to replace","newText":"replacement text"}',
+    '{"action":"finish","answer":"short summary for the user"}',
+    "Rules:",
+    "- Work only with relative paths inside the workspace.",
+    "- Read a file before editing it unless the user asked to create a new file.",
+    "- Use write_file for new files or full rewrites.",
+    "- Use replace_in_file for small precise edits.",
+    "- Never access .env, secrets, keys, credentials, or files outside the workspace.",
+    "- After completing the request, use finish."
+  ].join("\n");
+}
+
+async function askOllamaAgentJson(options = {}) {
+  const response = await fetchWithTimeout(`${String(options.ollamaUrl || DEFAULT_OLLAMA_URL).replace(/\/$/, "")}/api/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: options.apiModel,
+      stream: false,
+      options: {
+        num_ctx: 4096,
+        num_predict: 1200,
+        temperature: 0.1
+      },
+      messages: options.messages || []
+    })
+  }, options.timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS);
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(formatOllamaError(text, options.apiModel, response.status));
+  }
+
+  const json = await response.json();
+  return String(json?.message?.content || json?.response || "").trim();
+}
+
+function normalizeLocalAgentCommand(raw) {
+  const jsonText = extractJsonObjectText(raw);
+  if (!jsonText) {
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+
+  const explicitAction = getLocalAgentScalar(parsed.action || parsed.name || parsed.tool || parsed.command);
+  const objectAction = explicitAction ? "" : ["write_file", "write", "read_file", "read", "replace_in_file", "replace", "edit", "list_files", "list", "finish", "final"]
+    .find((key) => parsed && typeof parsed === "object" && parsed[key]);
+  const rawAction = explicitAction || objectAction || "";
+  const action = normalizeLocalAgentAction(rawAction);
+  if (!action) {
+    return null;
+  }
+
+  const args = parsed.arguments || parsed.args || (objectAction ? parsed[objectAction] : parsed) || {};
+  return {
+    action,
+    path: getLocalAgentScalar(args.path || args.filePath || args.file || args.filename || parsed.path),
+    content: getLocalAgentScalar(args.content || args.text || parsed.content),
+    oldText: getLocalAgentScalar(args.oldText || args.old_text || args.old || args.oldString || args.old_string),
+    newText: getLocalAgentScalar(args.newText || args.new_text || args.new || args.newString || args.new_string),
+    answer: getLocalAgentScalar(args.answer || args.summary || args.message || parsed.answer || parsed.summary || parsed.message)
+  };
+}
+
+function normalizeLocalAgentAction(value) {
+  const action = String(value || "").trim().toLowerCase().replace(/-/g, "_");
+  const map = {
+    list: "list_files",
+    ls: "list_files",
+    list_files: "list_files",
+    read: "read_file",
+    read_file: "read_file",
+    write: "write_file",
+    write_file: "write_file",
+    edit: "replace_in_file",
+    replace: "replace_in_file",
+    replace_in_file: "replace_in_file",
+    finish: "finish",
+    final: "finish",
+    done: "finish"
+  };
+  return map[action] || "";
+}
+
+function getLocalAgentScalar(value) {
+  if (value && typeof value === "object" && "value" in value) {
+    return getLocalAgentScalar(value.value);
+  }
+  if (value === undefined || value === null) {
+    return "";
+  }
+  return String(value);
+}
+
+async function executeLocalAgentCommand(command, cwd, changes) {
+  try {
+    if (command.action === "list_files") {
+      const dir = resolveLocalAgentPath(cwd, command.path || ".");
+      const stat = await vscode.workspace.fs.stat(vscode.Uri.file(dir));
+      if (stat.type !== vscode.FileType.Directory) {
+        return `ERROR: ${command.path || "."} is not a directory.`;
+      }
+      const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
+      const visible = entries
+        .filter(([name]) => ![".git", "node_modules", ".venv", "dist", "build", ".dart_tool"].includes(name))
+        .slice(0, 80)
+        .map(([name, type]) => `${type === vscode.FileType.Directory ? "dir " : "file"} ${path.relative(cwd, path.join(dir, name)).replace(/\\/g, "/")}`);
+      return `LIST ${path.relative(cwd, dir) || "."}:\n${visible.join("\n") || "(empty)"}`;
+    }
+
+    if (command.action === "read_file") {
+      const file = resolveLocalAgentPath(cwd, command.path);
+      const content = await readLocalAgentTextFile(file);
+      const rel = path.relative(cwd, file).replace(/\\/g, "/");
+      return `READ ${rel}:\n${truncateLocalAgentObservation(content)}`;
+    }
+
+    if (command.action === "write_file") {
+      const file = resolveLocalAgentPath(cwd, command.path);
+      if (typeof command.content !== "string") {
+        return "ERROR: write_file needs content.";
+      }
+      await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(file)));
+      await vscode.workspace.fs.writeFile(vscode.Uri.file(file), Buffer.from(command.content, "utf8"));
+      const rel = path.relative(cwd, file).replace(/\\/g, "/");
+      changes.push(`Wrote ${rel}`);
+      return `OK: wrote ${rel} (${Buffer.byteLength(command.content, "utf8")} bytes).`;
+    }
+
+    if (command.action === "replace_in_file") {
+      const file = resolveLocalAgentPath(cwd, command.path);
+      if (!command.oldText) {
+        return "ERROR: replace_in_file needs oldText.";
+      }
+      const current = await readLocalAgentTextFile(file);
+      if (!current.includes(command.oldText)) {
+        return `ERROR: oldText was not found in ${command.path}. Read the file and try a smaller exact match.`;
+      }
+      const next = current.replace(command.oldText, command.newText || "");
+      await vscode.workspace.fs.writeFile(vscode.Uri.file(file), Buffer.from(next, "utf8"));
+      const rel = path.relative(cwd, file).replace(/\\/g, "/");
+      changes.push(`Edited ${rel}`);
+      return `OK: edited ${rel}.`;
+    }
+  } catch (error) {
+    return `ERROR: ${getErrorMessage(error)}`;
+  }
+
+  return `ERROR: unsupported action ${command.action}.`;
+}
+
+function resolveLocalAgentPath(cwd, requestedPath) {
+  const raw = String(requestedPath || "").trim().replace(/^["']|["']$/g, "");
+  if (!raw) {
+    throw new Error("Missing path.");
+  }
+  if (raw.includes("\u0000")) {
+    throw new Error("Invalid path.");
+  }
+  const resolved = path.resolve(cwd, raw);
+  const root = path.resolve(cwd);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw new Error(`Refusing path outside workspace: ${requestedPath}`);
+  }
+  if (isUnsafeFilePath(resolved)) {
+    throw new Error(`Refusing protected file path: ${requestedPath}`);
+  }
+  return resolved;
+}
+
+async function readLocalAgentTextFile(file) {
+  const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
+  const text = Buffer.from(bytes).toString("utf8");
+  if (text.includes("\u0000")) {
+    throw new Error("Refusing binary file.");
+  }
+  return text;
+}
+
+function truncateLocalAgentObservation(value, maxChars = 40000) {
+  const text = String(value || "");
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}\n[truncated ${text.length - maxChars} chars]`;
+}
+
+function formatLocalAgentFinal(answer, changes, observations) {
+  const summary = String(answer || "").trim() || "Local Ollama agent finished.";
+  const lines = [summary];
+  if (changes.length > 0) {
+    lines.push("", "Changes:");
+    for (const change of changes) {
+      lines.push(`- ${change}`);
+    }
+  }
+  if (changes.length === 0 && observations.length > 0) {
+    lines.push("", observations[observations.length - 1]);
+  }
+  return lines.join("\n");
 }
 
 function getOpenCodeRunArgs(prompt, model) {
@@ -4048,6 +4341,7 @@ module.exports = {
     getOpenCodeProcessInvocation,
     getProviderRuntimeState,
     isQuotaOrRateLimitError,
+    normalizeLocalAgentCommand,
     normalizeGatewayModelName,
     normalizeOpenCodeCommand,
     normalizeOllamaCommand,
@@ -4059,6 +4353,7 @@ module.exports = {
     providerUsesGateway,
     providerUsesOllama,
     providerRequiresOllama,
+    runLocalOllamaFileAgent,
     runStepAgent,
     selectStepAgentPlannerProvider,
     selectRoute,
