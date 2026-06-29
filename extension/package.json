@@ -124,7 +124,9 @@
           "enum": [
             "auto",
             "step-agent",
+            "opencode-mimocode",
             "opencode",
+            "mimocode",
             "cerebras",
             "gemini",
             "gemini-fast",
@@ -204,6 +206,26 @@
           "type": "boolean",
           "default": true,
           "description": "Retry OpenCode with the local Ollama model when a non-local provider is rate limited."
+        },
+        "freeAiConsole.mimoCodeCommand": {
+          "type": "string",
+          "default": "mimo",
+          "description": "MiMoCode command used by the MiMoCode Agent and OpenCode + MiMoCode provider."
+        },
+        "freeAiConsole.mimoCodeModel": {
+          "type": "string",
+          "default": "ollama/qwen2.5-coder:3b",
+          "description": "MiMoCode Agent model in provider/model format."
+        },
+        "freeAiConsole.mimoCodeAgent": {
+          "type": "string",
+          "default": "build",
+          "description": "MiMoCode agent mode used for implementation inside the OpenCode + MiMoCode provider."
+        },
+        "freeAiConsole.mimoCodeAllowWorkspaceWrites": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow MiMoCode and the combined OpenCode + MiMoCode provider to approve workspace file edits during non-interactive agent runs."
         },
         "freeAiConsole.providerCooldownMinutes": {
           "type": "number",

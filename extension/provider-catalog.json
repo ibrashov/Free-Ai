@@ -74,6 +74,18 @@
     "enabled": true
   },
   {
+    "id": "opencode-mimocode",
+    "label": "OpenCode + MiMoCode",
+    "model": "ollama/qwen2.5-coder:3b + ollama/qwen2.5-coder:3b",
+    "role": "agent",
+    "costTier": "local-free",
+    "quotaType": "local-hardware",
+    "supportsTools": true,
+    "supportsOpenCode": true,
+    "priority": 48,
+    "enabled": true
+  },
+  {
     "id": "opencode",
     "label": "OpenCode Agent",
     "model": "ollama/qwen2.5-coder:3b",
@@ -83,6 +95,18 @@
     "supportsTools": true,
     "supportsOpenCode": true,
     "priority": 50,
+    "enabled": true
+  },
+  {
+    "id": "mimocode",
+    "label": "MiMoCode Agent",
+    "model": "ollama/qwen2.5-coder:3b",
+    "role": "agent",
+    "costTier": "local-free",
+    "quotaType": "local-hardware",
+    "supportsTools": true,
+    "supportsOpenCode": true,
+    "priority": 55,
     "enabled": true
   },
   {

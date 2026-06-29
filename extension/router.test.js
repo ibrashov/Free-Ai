@@ -32,10 +32,13 @@ const { _test } = require("./extension");
 const config = {
   localCoderModel: "ollama/qwen2.5-coder:3b",
   openCodeModel: "ollama/qwen2.5-coder:3b",
+  mimoCodeModel: "ollama/qwen2.5-coder:3b",
   stepAgentPlannerProvider: "auto"
 };
 const catalog = _test.buildProviderCatalog(config);
+const combinedProvider = catalog.find((provider) => provider.id === "opencode-mimocode");
 const openCodeProvider = catalog.find((provider) => provider.id === "opencode");
+const mimoCodeProvider = catalog.find((provider) => provider.id === "mimocode");
 const stepAgentProvider = catalog.find((provider) => provider.id === "step-agent");
 
 function createProvider(configOverrides = {}) {
@@ -54,6 +57,10 @@ function createProvider(configOverrides = {}) {
     ollamaUrl: "http://127.0.0.1:11434",
     localCoderModel: "ollama/qwen2.5-coder:3b",
     openCodeModel: "ollama/qwen2.5-coder:3b",
+    mimoCodeCommand: "mimo",
+    mimoCodeModel: "ollama/qwen2.5-coder:3b",
+    mimoCodeAgent: "build",
+    mimoCodeAllowWorkspaceWrites: true,
     openCodeFallbackToOllama: true,
     stepAgentPlannerProvider: "auto",
     stepAgentMaxSteps: 5,
@@ -70,6 +77,10 @@ function nextTick() {
 
 assert.ok(openCodeProvider.enabled);
 assert.equal(openCodeProvider.model, "ollama/qwen2.5-coder:3b");
+assert.ok(mimoCodeProvider.enabled);
+assert.equal(mimoCodeProvider.model, "ollama/qwen2.5-coder:3b");
+assert.ok(combinedProvider.enabled);
+assert.equal(combinedProvider.model, "ollama/qwen2.5-coder:3b + ollama/qwen2.5-coder:3b");
 assert.ok(stepAgentProvider.enabled);
 assert.match(stepAgentProvider.model, /planner:auto -> ollama\/qwen2\.5-coder:3b/);
 
@@ -98,16 +109,16 @@ assert.equal(route({ prompt: "Explain APIs", requestedProvider: "ollama" }).prov
 assert.equal(route({ prompt: "anything", requestedProvider: "step-agent" }).mode, "Step Agent");
 assert.equal(route({ prompt: "anything", requestedProvider: "step-agent" }).providers[0].id, "step-agent");
 
-assert.equal(route({ prompt: "проверь весь проект" }).mode, "Agent");
-assert.equal(route({ prompt: "проверь весь проект" }).providers[0].id, "opencode");
+assert.equal(route({ prompt: "проверь весь проект" }).mode, "Hybrid Agent");
+assert.equal(route({ prompt: "проверь весь проект" }).providers[0].id, "opencode-mimocode");
 
 assert.equal(route({ prompt: "README.md проверь", hasReferencedFiles: true }).mode, "File Review");
-assert.notEqual(route({ prompt: "README.md проверь", hasReferencedFiles: true }).providers[0].id, "opencode");
+assert.notEqual(route({ prompt: "README.md проверь", hasReferencedFiles: true }).providers[0].id, "opencode-mimocode");
 
 assert.equal(route({ prompt: "anything", autoMode: "survival" }).mode, "Local");
 assert.equal(route({ prompt: "anything", autoMode: "survival" }).providers[0].id, "ollama");
 assert.equal(route({ prompt: "answer with gemma" }).providers[0].id, "gemma");
-assert.equal(route({ prompt: "problem15.dart нужно исправить" }).providers[0].id, "opencode");
+assert.equal(route({ prompt: "problem15.dart нужно исправить" }).providers[0].id, "opencode-mimocode");
 assert.equal(route({ prompt: "ответь локально" }).providers[0].id, "ollama");
 
 const cooled = {
@@ -185,12 +196,20 @@ assert.equal(_test.getProviderRuntimeState({ id: "ollama", role: "local-fallback
 assert.equal(_test.providerUsesGateway({ id: "cerebras", model: "cerebras/gpt-oss-120b" }, {}), true);
 assert.equal(_test.providerUsesGateway({ id: "gemma", model: "ollama/gemma3:4b" }, {}), false);
 assert.equal(_test.providerUsesGateway(openCodeProvider, config), false);
+assert.equal(_test.providerUsesGateway(mimoCodeProvider, config), false);
+assert.equal(_test.providerUsesGateway(combinedProvider, config), false);
 assert.equal(_test.providerUsesGateway(stepAgentProvider, config), true);
 assert.equal(_test.providerUsesOllama(openCodeProvider, config), true);
+assert.equal(_test.providerUsesOllama(mimoCodeProvider, config), true);
+assert.equal(_test.providerUsesOllama(combinedProvider, config), true);
 assert.equal(_test.providerUsesOllama(stepAgentProvider, config), true);
 assert.equal(_test.providerRequiresOllama(openCodeProvider, config), true);
+assert.equal(_test.providerRequiresOllama(mimoCodeProvider, config), true);
+assert.equal(_test.providerRequiresOllama(combinedProvider, config), true);
 assert.equal(_test.providerRequiresOllama(stepAgentProvider, config), true);
 assert.deepEqual(_test.getProviderOllamaModels(stepAgentProvider, config), ["qwen2.5-coder:3b"]);
+assert.deepEqual(_test.getProviderOllamaModels(mimoCodeProvider, config), ["qwen2.5-coder:3b"]);
+assert.deepEqual(_test.getProviderOllamaModels(combinedProvider, config), ["qwen2.5-coder:3b"]);
 assert.deepEqual(_test.getOpenCodeRunArgs("hello", "ollama/qwen2.5-coder:3b"), [
   "run",
   "hello",
@@ -199,16 +218,44 @@ assert.deepEqual(_test.getOpenCodeRunArgs("hello", "ollama/qwen2.5-coder:3b"), [
   "--format",
   "json"
 ]);
+assert.deepEqual(_test.getMimoCodeRunArgs("hello", "ollama/qwen2.5-coder:3b", {
+  agent: "build",
+  allowWorkspaceWrites: true
+}), [
+  "run",
+  "hello",
+  "-m",
+  "ollama/qwen2.5-coder:3b",
+  "--format",
+  "json",
+  "--agent",
+  "build",
+  "--dangerously-skip-permissions"
+]);
+assert.match(_test.buildCombinedAgentPlanPrompt("Fix tests"), /Do not edit files/);
+assert.match(_test.buildCombinedAgentImplementationPrompt("Fix tests", "Plan text"), /OpenCode already produced the plan/);
+assert.match(_test.buildCombinedAgentReviewPrompt("Fix tests", "Plan text", "Done"), /reviewing and repairing/);
+assert.match(_test.buildMimoCodeAgentPrompt("Fix tests"), /MiMoCode/);
 if (process.platform === "win32") {
   assert.equal(_test.normalizeOpenCodeCommand("opencode"), "opencode.cmd");
   assert.equal(_test.normalizeOpenCodeCommand(""), "opencode.cmd");
+  assert.equal(_test.normalizeMimoCodeCommand("mimo"), "mimo.cmd");
+  assert.equal(_test.normalizeMimoCodeCommand(""), "mimo.cmd");
   const openCodeInvocation = _test.getOpenCodeProcessInvocation("opencode", ["--version"]);
   assert.match(openCodeInvocation.command, /cmd\.exe$/i);
   assert.deepEqual(openCodeInvocation.args, ["/d", "/s", "/c", "opencode.cmd", "--version"]);
+  const mimoCodeInvocation = _test.getMimoCodeProcessInvocation("mimo", ["--version"]);
+  assert.match(mimoCodeInvocation.command, /cmd\.exe$/i);
+  assert.deepEqual(mimoCodeInvocation.args, ["/d", "/s", "/c", "mimo.cmd", "--version"]);
 } else {
   assert.equal(_test.normalizeOpenCodeCommand("opencode"), "opencode");
+  assert.equal(_test.normalizeMimoCodeCommand("mimo"), "mimo");
   assert.deepEqual(_test.getOpenCodeProcessInvocation("opencode", ["--version"]), {
     command: "opencode",
+    args: ["--version"]
+  });
+  assert.deepEqual(_test.getMimoCodeProcessInvocation("mimo", ["--version"]), {
+    command: "mimo",
     args: ["--version"]
   });
 }

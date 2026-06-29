@@ -8,9 +8,12 @@ const providerCatalog = require("./provider-catalog.json");
 const execFileAsync = promisify(execFile);
 
 const OPENCODE_PROVIDER = "opencode";
+const MIMOCODE_PROVIDER = "mimocode";
+const COMBINED_AGENT_PROVIDER = "opencode-mimocode";
 const STEP_AGENT_PROVIDER = "step-agent";
 const DEFAULT_LOCAL_CODER_MODEL = "ollama/qwen2.5-coder:3b";
 const OPENCODE_MODEL = DEFAULT_LOCAL_CODER_MODEL;
+const MIMOCODE_MODEL = DEFAULT_LOCAL_CODER_MODEL;
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
 const DEFAULT_OLLAMA_COMMAND = "ollama serve";
 const DEFAULT_OLLAMA_MODELS_DIRECTORY = "C:\\OllamaModels";
@@ -414,7 +417,41 @@ class FreeAiViewProvider {
             }
           }
 
-          const answer = selectedProvider.id === OPENCODE_PROVIDER
+          const answer = selectedProvider.id === COMBINED_AGENT_PROVIDER
+            ? await askCombinedCodingAgent({
+              openCodeCommand: config.openCodeCommand,
+              openCodeModel: config.openCodeModel,
+              mimoCodeCommand: config.mimoCodeCommand,
+              mimoCodeModel: config.mimoCodeModel,
+              mimoCodeAgent: config.mimoCodeAgent,
+              allowWorkspaceWrites: config.mimoCodeAllowWorkspaceWrites,
+              localModel: config.localCoderModel,
+              ollamaUrl: config.ollamaUrl,
+              authToken: config.authToken,
+              prompt: text,
+              ensureOllama: (models) => this.ensureOllamaRunning({
+                force: false,
+                showMessage: false,
+                models: Array.isArray(models) ? models : [models].filter(Boolean)
+              }),
+              timeoutMs: config.requestTimeoutMs
+            })
+            : selectedProvider.id === MIMOCODE_PROVIDER
+              ? await askMimoCode({
+                command: config.mimoCodeCommand,
+                model: config.mimoCodeModel,
+                agent: config.mimoCodeAgent,
+                allowWorkspaceWrites: config.mimoCodeAllowWorkspaceWrites,
+                authToken: config.authToken,
+                prompt: text,
+                ensureOllama: (model) => this.ensureOllamaRunning({
+                  force: false,
+                  showMessage: false,
+                  models: [model]
+                }),
+                timeoutMs: config.requestTimeoutMs
+              })
+            : selectedProvider.id === OPENCODE_PROVIDER
             ? await askOpenCode({
               command: config.openCodeCommand,
               model: config.openCodeModel,
@@ -427,7 +464,8 @@ class FreeAiViewProvider {
                 force: false,
                 showMessage: false,
                 models: [model]
-              })
+              }),
+              timeoutMs: config.requestTimeoutMs
             })
             : selectedProvider.id === STEP_AGENT_PROVIDER
               ? await this.askStepAgent(text, config)
@@ -753,6 +791,10 @@ class FreeAiViewProvider {
       openCodeCommand: config.get("openCodeCommand", getDefaultOpenCodeCommand()),
       openCodeModel: config.get("openCodeModel", OPENCODE_MODEL),
       openCodeFallbackToOllama: config.get("openCodeFallbackToOllama", true),
+      mimoCodeCommand: config.get("mimoCodeCommand", getDefaultMimoCodeCommand()),
+      mimoCodeModel: config.get("mimoCodeModel", MIMOCODE_MODEL),
+      mimoCodeAgent: config.get("mimoCodeAgent", "build"),
+      mimoCodeAllowWorkspaceWrites: config.get("mimoCodeAllowWorkspaceWrites", true),
       providerCooldownMinutes: config.get("providerCooldownMinutes", 10),
       localCoderModel: config.get("localCoderModel", DEFAULT_LOCAL_CODER_MODEL),
       ollamaUrl: config.get("ollamaUrl", DEFAULT_OLLAMA_URL).replace(/\/$/, ""),
@@ -1452,7 +1494,9 @@ class FreeAiViewProvider {
       <select id="provider" aria-label="Provider">
         ${providerOption("auto", "Auto - multi AI", defaultProvider)}
         ${providerOption("step-agent", "Step Agent", defaultProvider)}
+        ${providerOption("opencode-mimocode", "OpenCode + MiMoCode", defaultProvider)}
         ${providerOption("opencode", "OpenCode Agent", defaultProvider)}
+        ${providerOption("mimocode", "MiMoCode Agent", defaultProvider)}
         ${providerOption("cerebras", "Cerebras", defaultProvider)}
         ${providerOption("gemini", "Gemini", defaultProvider)}
         ${providerOption("gemini-fast", "Gemini Fast", defaultProvider)}
@@ -2274,6 +2318,15 @@ function getProviderOllamaModels(provider, config = {}) {
     return models;
   }
 
+  if (provider.id === COMBINED_AGENT_PROVIDER) {
+    addRequiredOllamaModel(models, config.openCodeModel || OPENCODE_MODEL);
+    addRequiredOllamaModel(models, config.mimoCodeModel || MIMOCODE_MODEL);
+    if (config.openCodeFallbackToOllama !== false) {
+      addRequiredOllamaModel(models, config.localCoderModel || DEFAULT_LOCAL_CODER_MODEL);
+    }
+    return models;
+  }
+
   if (provider.id === STEP_AGENT_PROVIDER) {
     addRequiredOllamaModel(models, config.localCoderModel || DEFAULT_LOCAL_CODER_MODEL);
     const planner = selectStepAgentPlannerProvider({
@@ -2291,6 +2344,8 @@ function getProviderOllamaModels(provider, config = {}) {
 
   const selectedModel = provider.id === OPENCODE_PROVIDER
     ? (config.openCodeModel || provider.model || OPENCODE_MODEL)
+    : provider.id === MIMOCODE_PROVIDER
+      ? (config.mimoCodeModel || provider.model || MIMOCODE_MODEL)
     : provider.id === "ollama"
       ? (config.localCoderModel || provider.model || DEFAULT_LOCAL_CODER_MODEL)
       : provider.model;
@@ -2527,6 +2582,44 @@ async function testProviderAvailability(config, provider) {
     ? (config.localCoderModel || provider.model)
     : provider.model;
 
+  if (provider.id === COMBINED_AGENT_PROVIDER) {
+    const openCodeCheck = await testCodingCliCommandAvailability({
+      command: config.openCodeCommand,
+      label: "OpenCode",
+      normalizeCommand: normalizeOpenCodeCommand,
+      timeoutMs: config.requestTimeoutMs || PROVIDER_TEST_TIMEOUT_MS
+    });
+    const mimoCodeCheck = await testCodingCliCommandAvailability({
+      command: config.mimoCodeCommand,
+      label: "MiMoCode",
+      normalizeCommand: normalizeMimoCodeCommand,
+      timeoutMs: config.requestTimeoutMs || PROVIDER_TEST_TIMEOUT_MS
+    });
+    return `Combined agent configured: ${openCodeCheck}; ${mimoCodeCheck}; mode OpenCode plan -> MiMoCode edit -> OpenCode review`;
+  }
+
+  if (provider.id === OPENCODE_PROVIDER) {
+    const local = providerRequiresOllama(provider, config) ? "local Ollama model" : "configured model";
+    const cliCheck = await testCodingCliCommandAvailability({
+      command: config.openCodeCommand,
+      label: "OpenCode",
+      normalizeCommand: normalizeOpenCodeCommand,
+      timeoutMs: config.requestTimeoutMs || PROVIDER_TEST_TIMEOUT_MS
+    });
+    return `${cliCheck} configured with ${local}; chat smoke test skipped`;
+  }
+
+  if (provider.id === MIMOCODE_PROVIDER) {
+    const local = providerRequiresOllama(provider, config) ? "local Ollama model" : "configured model";
+    const cliCheck = await testCodingCliCommandAvailability({
+      command: config.mimoCodeCommand,
+      label: "MiMoCode",
+      normalizeCommand: normalizeMimoCodeCommand,
+      timeoutMs: config.requestTimeoutMs || PROVIDER_TEST_TIMEOUT_MS
+    });
+    return `${cliCheck} configured with ${local}; chat smoke test skipped`;
+  }
+
   if (String(selectedModel || "").startsWith("ollama/")) {
     const answer = await askOllamaDirect(
       config.ollamaUrl || DEFAULT_OLLAMA_URL,
@@ -2536,11 +2629,6 @@ async function testProviderAvailability(config, provider) {
       config.requestTimeoutMs || DEFAULT_REQUEST_TIMEOUT_MS
     );
     return answer || "local model responded";
-  }
-
-  if (provider.id === OPENCODE_PROVIDER) {
-    const local = providerRequiresOllama(provider, config) ? "local Ollama model" : "configured model";
-    return `${normalizeOpenCodeCommand(config.openCodeCommand)} configured with ${local}; chat smoke test skipped`;
   }
 
   if (provider.id === STEP_AGENT_PROVIDER) {
@@ -2678,6 +2766,177 @@ async function askOllamaDirect(
   return String(json?.message?.content || json?.response || "").trim();
 }
 
+async function askCombinedCodingAgent(options = {}) {
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    throw new Error("OpenCode + MiMoCode Agent needs an open workspace folder.");
+  }
+
+  const cwd = workspaceFolder.uri.fsPath;
+  const openCodeModel = options.openCodeModel || OPENCODE_MODEL;
+  const mimoCodeModel = options.mimoCodeModel || MIMOCODE_MODEL;
+  if (typeof options.ensureOllama === "function") {
+    const models = [];
+    addRequiredOllamaModel(models, openCodeModel);
+    addRequiredOllamaModel(models, mimoCodeModel);
+    if (models.length > 0) {
+      const ollama = await options.ensureOllama(models);
+      if (ollama?.state !== "ready") {
+        throw new Error(`Combined agent needs local Ollama. ${ollama?.text || "Ollama is not ready"}${ollama?.detail ? `: ${ollama.detail}` : ""}`);
+      }
+    }
+  }
+
+  const userPrompt = String(options.prompt || "").trim();
+  const plan = await runOpenCode({
+    command: options.openCodeCommand,
+    model: openCodeModel,
+    authToken: options.authToken,
+    prompt: buildCombinedAgentPlanPrompt(userPrompt),
+    cwd,
+    agent: "plan",
+    allowWorkspaceWrites: false,
+    timeoutMs: options.timeoutMs
+  });
+
+  const implementation = await runMimoCode({
+    command: options.mimoCodeCommand,
+    model: mimoCodeModel,
+    authToken: options.authToken,
+    prompt: buildCombinedAgentImplementationPrompt(userPrompt, plan),
+    cwd,
+    agent: options.mimoCodeAgent || "build",
+    allowWorkspaceWrites: options.allowWorkspaceWrites !== false,
+    timeoutMs: options.timeoutMs
+  });
+
+  const review = await runOpenCode({
+    command: options.openCodeCommand,
+    model: openCodeModel,
+    authToken: options.authToken,
+    prompt: buildCombinedAgentReviewPrompt(userPrompt, plan, implementation),
+    cwd,
+    agent: "build",
+    allowWorkspaceWrites: options.allowWorkspaceWrites !== false,
+    timeoutMs: options.timeoutMs
+  });
+
+  return formatCombinedAgentResult({ plan, implementation, review });
+}
+
+async function askMimoCode(options = {}) {
+  const {
+    command,
+    model,
+    agent,
+    authToken,
+    prompt,
+    allowWorkspaceWrites,
+    ensureOllama,
+    timeoutMs
+  } = options || {};
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    throw new Error("MiMoCode Agent needs an open workspace folder.");
+  }
+
+  const selectedModel = model || MIMOCODE_MODEL;
+  if (String(selectedModel || "").startsWith("ollama/") && typeof ensureOllama === "function") {
+    const ollama = await ensureOllama(normalizeOpenCodeOllamaModel(selectedModel));
+    if (ollama?.state !== "ready") {
+      throw new Error(`MiMoCode Agent needs local Ollama. ${ollama?.text || "Ollama is not ready"}${ollama?.detail ? `: ${ollama.detail}` : ""}`);
+    }
+  }
+
+  return runMimoCode({
+    command,
+    model: selectedModel,
+    authToken,
+    prompt: buildMimoCodeAgentPrompt(prompt),
+    cwd: workspaceFolder.uri.fsPath,
+    agent: agent || "build",
+    allowWorkspaceWrites: allowWorkspaceWrites !== false,
+    timeoutMs
+  });
+}
+
+function buildCombinedAgentPlanPrompt(userPrompt) {
+  return [
+    "You are OpenCode planning a joint coding-agent run.",
+    "Read the workspace only as needed. Do not edit files in this phase.",
+    "Create a concise implementation plan for MiMoCode.",
+    "Name the files that probably need to be read, changed, created, or tested.",
+    "Call out likely tests or commands to run after the edit.",
+    "",
+    "User request:",
+    String(userPrompt || "")
+  ].join("\n");
+}
+
+function buildCombinedAgentImplementationPrompt(userPrompt, plan) {
+  return [
+    "You are MiMoCode working together with OpenCode inside VS Code.",
+    "OpenCode already produced the plan below. Use it, but verify the files yourself before editing.",
+    "You may read, edit, and create files only inside the current workspace.",
+    "Do not touch secrets, .env files, credentials, or files outside the workspace.",
+    "Make the smallest useful implementation. Run focused checks when practical.",
+    "After editing, summarize changed files and any test result.",
+    "",
+    "OpenCode plan:",
+    clipText(plan, 12000),
+    "",
+    "User request:",
+    String(userPrompt || "")
+  ].join("\n");
+}
+
+function buildCombinedAgentReviewPrompt(userPrompt, plan, implementation) {
+  return [
+    "You are OpenCode reviewing and repairing a MiMoCode implementation.",
+    "Inspect the current workspace state. If there is a real bug, broken syntax, missing file, or failed focused test, fix it.",
+    "Keep changes small. Do not rewrite unrelated code.",
+    "Run focused tests or checks when practical and report their result.",
+    "",
+    "Original user request:",
+    String(userPrompt || ""),
+    "",
+    "Original OpenCode plan:",
+    clipText(plan, 8000),
+    "",
+    "MiMoCode implementation summary:",
+    clipText(implementation, 12000)
+  ].join("\n");
+}
+
+function buildMimoCodeAgentPrompt(prompt) {
+  return [
+    "You are MiMoCode called from the user's Free AI VS Code panel.",
+    "Read project files when the request asks about files, code, or project review.",
+    "If the user asks to fix, edit, change, or create files, make the smallest useful workspace edits.",
+    "Do not touch secrets, .env files, credentials, or files outside the workspace.",
+    "Run focused checks when practical, then summarize what changed.",
+    "If the request is only a question or review, answer in chat without editing files.",
+    "",
+    "User request:",
+    String(prompt || "")
+  ].join("\n");
+}
+
+function formatCombinedAgentResult(result = {}) {
+  return [
+    "OpenCode + MiMoCode finished.",
+    "",
+    "OpenCode plan:",
+    clipText(result.plan, 4000),
+    "",
+    "MiMoCode implementation:",
+    clipText(result.implementation, 8000),
+    "",
+    "OpenCode review/repair:",
+    clipText(result.review, 8000)
+  ].join("\n").trim();
+}
+
 async function askOpenCode(options) {
   const {
     command,
@@ -2755,9 +3014,32 @@ async function askOpenCode(options) {
 }
 
 async function runOpenCode(options) {
-  const { command, model, authToken, prompt, cwd, timeoutMs } = options;
-  const runArgs = getOpenCodeRunArgs(prompt, model || OPENCODE_MODEL);
-  const invocation = getOpenCodeProcessInvocation(command, runArgs);
+  return runCodingCliAgent({
+    ...options,
+    label: "OpenCode",
+    command: options.command,
+    model: options.model || OPENCODE_MODEL,
+    normalizeCommand: normalizeOpenCodeCommand
+  });
+}
+
+async function runMimoCode(options) {
+  return runCodingCliAgent({
+    ...options,
+    label: "MiMoCode",
+    command: options.command,
+    model: options.model || MIMOCODE_MODEL,
+    normalizeCommand: normalizeMimoCodeCommand
+  });
+}
+
+async function runCodingCliAgent(options = {}) {
+  const { command, model, authToken, prompt, cwd, timeoutMs, agent, allowWorkspaceWrites, normalizeCommand } = options;
+  const runArgs = getCodingAgentRunArgs(prompt, model, {
+    agent,
+    allowWorkspaceWrites
+  });
+  const invocation = getCodingAgentProcessInvocation(command, runArgs, normalizeCommand);
   const { stdout, stderr } = await execFileAsync(
     invocation.command,
     invocation.args,
@@ -3058,7 +3340,23 @@ function formatLocalAgentFinal(answer, changes, observations) {
 }
 
 function getOpenCodeRunArgs(prompt, model) {
-  return ["run", String(prompt || ""), "-m", model || OPENCODE_MODEL, "--format", "json"];
+  return getCodingAgentRunArgs(prompt, model || OPENCODE_MODEL);
+}
+
+function getMimoCodeRunArgs(prompt, model, options = {}) {
+  return getCodingAgentRunArgs(prompt, model || MIMOCODE_MODEL, options);
+}
+
+function getCodingAgentRunArgs(prompt, model, options = {}) {
+  const args = ["run", String(prompt || ""), "-m", model || OPENCODE_MODEL, "--format", "json"];
+  const agent = String(options.agent || "").trim();
+  if (agent) {
+    args.push("--agent", agent);
+  }
+  if (options.allowWorkspaceWrites) {
+    args.push("--dangerously-skip-permissions");
+  }
+  return args;
 }
 
 function isWindowsCommandShim(command) {
@@ -3066,7 +3364,15 @@ function isWindowsCommandShim(command) {
 }
 
 function getOpenCodeProcessInvocation(command, args = []) {
-  const normalizedCommand = normalizeOpenCodeCommand(command);
+  return getCodingAgentProcessInvocation(command, args, normalizeOpenCodeCommand);
+}
+
+function getMimoCodeProcessInvocation(command, args = []) {
+  return getCodingAgentProcessInvocation(command, args, normalizeMimoCodeCommand);
+}
+
+function getCodingAgentProcessInvocation(command, args = [], normalizeCommand = normalizeOpenCodeCommand) {
+  const normalizedCommand = normalizeCommand(command);
   if (!isWindowsCommandShim(normalizedCommand)) {
     return {
       command: normalizedCommand,
@@ -3505,7 +3811,7 @@ function selectProviders(prompt, requestedProvider) {
   const lower = String(prompt || "").toLowerCase();
 
   if (shouldUseOpenCodeAgent(lower)) {
-    return [OPENCODE_PROVIDER];
+    return [COMBINED_AGENT_PROVIDER];
   }
 
   if (/gemma/i.test(lower)) {
@@ -3542,7 +3848,7 @@ function selectRoute(options) {
       providers.push(localProvider);
     }
     return {
-      mode: manualProvider?.id === STEP_AGENT_PROVIDER ? "Step Agent" : manualProvider?.role === "agent" ? "Agent" : manualProvider?.role === "local-fallback" ? "Local" : "Manual",
+      mode: manualProvider?.id === STEP_AGENT_PROVIDER ? "Step Agent" : manualProvider?.id === COMBINED_AGENT_PROVIDER ? "Hybrid Agent" : manualProvider?.role === "agent" ? "Agent" : manualProvider?.role === "local-fallback" ? "Local" : "Manual",
       reason: manualProvider?.role === "chat" ? "Manual provider selection with local fallback" : "Manual provider selection",
       providers,
       compare: false
@@ -3582,9 +3888,10 @@ function selectRoute(options) {
   }
 
   if (intent.agent) {
-    const agentProvider = catalog.find((provider) => provider.role === "agent");
+    const agentProvider = catalog.find((provider) => provider.id === COMBINED_AGENT_PROVIDER)
+      || catalog.find((provider) => provider.role === "agent");
     return {
-      mode: "Agent",
+      mode: agentProvider?.id === COMBINED_AGENT_PROVIDER ? "Hybrid Agent" : "Agent",
       reason: intent.reason,
       providers: agentProvider ? [agentProvider] : localProvider ? [localProvider] : [],
       compare: false
@@ -3643,7 +3950,7 @@ function classifyPrompt(prompt, hasReferencedFiles) {
       stepAgent: false,
       local: false,
       fileReview: false,
-      reason: "Project-wide request needs OpenCode Agent"
+      reason: "Project-wide request needs OpenCode + MiMoCode Agent"
     };
   }
 
@@ -3663,7 +3970,7 @@ function classifyPrompt(prompt, hasReferencedFiles) {
       stepAgent: false,
       local: false,
       fileReview: false,
-      reason: "Edit/change request needs OpenCode Agent"
+      reason: "Edit/change request needs OpenCode + MiMoCode Agent"
     };
   }
 
@@ -3736,12 +4043,50 @@ function getDefaultOpenCodeCommand() {
   return process.platform === "win32" ? "opencode.cmd" : "opencode";
 }
 
+function getDefaultMimoCodeCommand() {
+  return process.platform === "win32" ? "mimo.cmd" : "mimo";
+}
+
 function normalizeOpenCodeCommand(command) {
   const value = String(command || "").trim();
   if (process.platform === "win32" && (!value || value.toLowerCase() === "opencode")) {
     return "opencode.cmd";
   }
   return value || getDefaultOpenCodeCommand();
+}
+
+function normalizeMimoCodeCommand(command) {
+  const value = String(command || "").trim();
+  if (process.platform === "win32" && (!value || value.toLowerCase() === "mimo")) {
+    return "mimo.cmd";
+  }
+  return value || getDefaultMimoCodeCommand();
+}
+
+async function testCodingCliCommandAvailability(options = {}) {
+  const normalizeCommand = options.normalizeCommand || ((value) => value);
+  const command = normalizeCommand(options.command);
+  const invocation = getCodingAgentProcessInvocation(command, ["--version"], normalizeCommand);
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      invocation.command,
+      invocation.args,
+      {
+        cwd: vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath || process.cwd(),
+        env: {
+          ...process.env,
+          NO_COLOR: "1"
+        },
+        maxBuffer: 1024 * 1024,
+        timeout: Math.min(options.timeoutMs || PROVIDER_TEST_TIMEOUT_MS, 15000),
+        windowsHide: true
+      }
+    );
+    const version = cleanTerminalText(stdout || stderr || "").split(/\r?\n/).find(Boolean) || "available";
+    return `${options.label || command} ${version}`;
+  } catch (error) {
+    throw new Error(`${options.label || command} command is not available: ${getErrorMessage(error)}`);
+  }
 }
 
 function parseOpenCodeRunOutput(value) {
@@ -3790,8 +4135,14 @@ function providerUsesGateway(provider, config = {}) {
       ? providerUsesGateway(planner, config)
       : false;
   }
+  if (provider.id === COMBINED_AGENT_PROVIDER) {
+    return providerUsesGateway({ id: OPENCODE_PROVIDER, model: config.openCodeModel || OPENCODE_MODEL }, config)
+      || providerUsesGateway({ id: MIMOCODE_PROVIDER, model: config.mimoCodeModel || MIMOCODE_MODEL }, config);
+  }
   const model = provider.id === OPENCODE_PROVIDER
     ? (config.openCodeModel || provider.model)
+    : provider.id === MIMOCODE_PROVIDER
+      ? (config.mimoCodeModel || provider.model)
     : provider.id === "ollama"
       ? (config.localCoderModel || provider.model)
       : provider.model;
@@ -3805,9 +4156,16 @@ function providerUsesOllama(provider, config = {}) {
   if (provider.id === STEP_AGENT_PROVIDER) {
     return true;
   }
+  if (provider.id === COMBINED_AGENT_PROVIDER) {
+    return providerUsesOllama({ id: OPENCODE_PROVIDER, model: config.openCodeModel || OPENCODE_MODEL }, config)
+      || providerUsesOllama({ id: MIMOCODE_PROVIDER, model: config.mimoCodeModel || MIMOCODE_MODEL }, config);
+  }
   if (provider.id === OPENCODE_PROVIDER) {
     return String(config.openCodeModel || provider.model || "").startsWith("ollama/")
       || Boolean(config.openCodeFallbackToOllama);
+  }
+  if (provider.id === MIMOCODE_PROVIDER) {
+    return String(config.mimoCodeModel || provider.model || "").startsWith("ollama/");
   }
   const model = provider.id === "ollama"
     ? (config.localCoderModel || provider.model)
@@ -3822,8 +4180,14 @@ function providerRequiresOllama(provider, config = {}) {
   if (provider.id === STEP_AGENT_PROVIDER) {
     return true;
   }
+  if (provider.id === COMBINED_AGENT_PROVIDER) {
+    return providerRequiresOllama({ id: OPENCODE_PROVIDER, model: config.openCodeModel || OPENCODE_MODEL }, config)
+      || providerRequiresOllama({ id: MIMOCODE_PROVIDER, model: config.mimoCodeModel || MIMOCODE_MODEL }, config);
+  }
   const model = provider.id === OPENCODE_PROVIDER
     ? (config.openCodeModel || provider.model)
+    : provider.id === MIMOCODE_PROVIDER
+      ? (config.mimoCodeModel || provider.model)
     : provider.id === "ollama"
       ? (config.localCoderModel || provider.model)
       : provider.model;
@@ -3842,6 +4206,18 @@ function buildProviderCatalog(config) {
       return {
         ...provider,
         model: config.openCodeModel || provider.model
+      };
+    }
+    if (provider.id === MIMOCODE_PROVIDER) {
+      return {
+        ...provider,
+        model: config.mimoCodeModel || provider.model
+      };
+    }
+    if (provider.id === COMBINED_AGENT_PROVIDER) {
+      return {
+        ...provider,
+        model: `${config.openCodeModel || OPENCODE_MODEL} + ${config.mimoCodeModel || MIMOCODE_MODEL}`
       };
     }
     if (provider.id === STEP_AGENT_PROVIDER) {
@@ -4323,6 +4699,10 @@ module.exports = {
     buildStepAgentPlanPrompt,
     buildStepAgentVerificationPrompt,
     buildStepAgentWorkerPrompt,
+    buildCombinedAgentImplementationPrompt,
+    buildCombinedAgentPlanPrompt,
+    buildCombinedAgentReviewPrompt,
+    buildMimoCodeAgentPrompt,
     buildProviderCatalog,
     classifyPrompt,
     createChatRecord,
@@ -4337,12 +4717,15 @@ module.exports = {
     getProviderOllamaModels,
     getOllamaStartEnv,
     getRequiredOllamaModels,
+    getMimoCodeRunArgs,
+    getMimoCodeProcessInvocation,
     getOpenCodeRunArgs,
     getOpenCodeProcessInvocation,
     getProviderRuntimeState,
     isQuotaOrRateLimitError,
     normalizeLocalAgentCommand,
     normalizeGatewayModelName,
+    normalizeMimoCodeCommand,
     normalizeOpenCodeCommand,
     normalizeOllamaCommand,
     normalizeOllamaApiModel,
