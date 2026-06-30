@@ -242,6 +242,10 @@ assert.deepEqual(_test.getOpenCodeRunArgs("hello", "ollama/qwen2.5-coder:3b"), [
   "json"
 ]);
 assert.equal(_test.getOpenCodeRunArgs("line one\nline two", "ollama/qwen2.5-coder:3b")[1], "line one\\nline two");
+const nullByteOpenCodeArgs = _test.getOpenCodeRunArgs("a\u0000b\r\nc", "ollama/qwen2.5-coder:3b\u0000");
+assert.equal(nullByteOpenCodeArgs[1], "ab\\nc");
+assert.equal(nullByteOpenCodeArgs[3], "ollama/qwen2.5-coder:3b");
+assert.equal(nullByteOpenCodeArgs.some((arg) => String(arg).includes("\u0000")), false);
 assert.deepEqual(_test.getMimoCodeRunArgs("hello", "ollama/qwen2.5-coder:3b", {
   agent: "build",
   allowWorkspaceWrites: true
@@ -256,6 +260,12 @@ assert.deepEqual(_test.getMimoCodeRunArgs("hello", "ollama/qwen2.5-coder:3b", {
   "build",
   "--dangerously-skip-permissions"
 ]);
+const nullByteMimoCodeArgs = _test.getMimoCodeRunArgs("hello\u0000", "ollama/qwen2.5-coder:3b\u0000", {
+  agent: "build\u0000",
+  dir: "C:\\tmp\u0000x",
+  allowWorkspaceWrites: true
+});
+assert.equal(nullByteMimoCodeArgs.some((arg) => String(arg).includes("\u0000")), false);
 assert.match(_test.buildCombinedAgentPlanPrompt("Fix tests"), /Do not edit files/);
 assert.equal(_test.buildCombinedAgentImplementationPrompt("Fix tests", "Plan text"), "Fix tests");
 assert.match(_test.buildCombinedAgentReviewPrompt("Fix tests", "Plan text", "Done"), /reviewing and repairing/);

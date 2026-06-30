@@ -351,12 +351,12 @@ class FreeAiViewProvider {
       return;
     }
 
-    let text = String(prompt || "").trim();
+    let text = stripNullBytes(prompt).trim();
     if (!text) {
       return;
     }
 
-    let userDisplay = String(displayPrompt || text).trim();
+    let userDisplay = stripNullBytes(displayPrompt || text).trim();
     const routeText = getPromptForRouting(text, userDisplay);
     let editSourceFiles = Array.isArray(attachedFiles) ? [...attachedFiles] : [];
     const chat = this.ensureChat(chatId);
@@ -1019,6 +1019,10 @@ class FreeAiViewProvider {
       try {
         const bytes = await vscode.workspace.fs.readFile(uri);
         const raw = Buffer.from(bytes).toString("utf8");
+        if (raw.includes("\u0000")) {
+          this.post({ type: "status", text: `Skipped binary file: ${path.basename(uri.fsPath)}` });
+          continue;
+        }
         const text = raw.length > maxCharsPerFile ? raw.slice(0, maxCharsPerFile) : raw;
         files.push({
           name: uri.path.split(/[\\/]/).pop() || "file",
@@ -3452,12 +3456,12 @@ function getMimoCodeRunArgs(prompt, model, options = {}) {
 }
 
 function getCodingAgentRunArgs(prompt, model, options = {}) {
-  const args = ["run", normalizeCodingAgentPromptArgument(prompt), "-m", model || OPENCODE_MODEL, "--format", "json"];
-  const agent = String(options.agent || "").trim();
+  const args = ["run", normalizeCodingAgentPromptArgument(prompt), "-m", stripNullBytes(model || OPENCODE_MODEL), "--format", "json"];
+  const agent = stripNullBytes(options.agent).trim();
   if (agent) {
     args.push("--agent", agent);
   }
-  const dir = String(options.dir || "").trim();
+  const dir = stripNullBytes(options.dir).trim();
   if (dir) {
     args.push("--dir", dir);
   }
@@ -3502,15 +3506,15 @@ async function execCodingAgentInvocation(invocation, options = {}) {
 }
 
 function normalizeCodingAgentPromptArgument(prompt) {
-  return String(prompt || "").replace(/\r\n/g, "\n").replace(/\n/g, "\\n");
+  return stripNullBytes(prompt).replace(/\r\n/g, "\n").replace(/\n/g, "\\n");
 }
 
 function buildWindowsCommandLine(args = []) {
-  return args.map(quoteWindowsCommandArgument).join(" ");
+  return args.map((arg) => quoteWindowsCommandArgument(stripNullBytes(arg))).join(" ");
 }
 
 function quoteWindowsCommandArgument(value) {
-  const text = String(value ?? "");
+  const text = stripNullBytes(value);
   if (!text) {
     return "\"\"";
   }
@@ -4175,6 +4179,10 @@ function formatProviderName(provider) {
   return found?.label || provider;
 }
 
+function stripNullBytes(value) {
+  return String(value ?? "").replace(/\u0000/g, "");
+}
+
 function getDefaultOpenCodeCommand() {
   return process.platform === "win32" ? "opencode.cmd" : "opencode";
 }
@@ -4184,7 +4192,7 @@ function getDefaultMimoCodeCommand() {
 }
 
 function normalizeOpenCodeCommand(command) {
-  const value = String(command || "").trim();
+  const value = stripNullBytes(command).trim();
   if (process.platform === "win32" && (!value || value.toLowerCase() === "opencode")) {
     return "opencode.cmd";
   }
@@ -4192,7 +4200,7 @@ function normalizeOpenCodeCommand(command) {
 }
 
 function normalizeMimoCodeCommand(command) {
-  const value = String(command || "").trim();
+  const value = stripNullBytes(command).trim();
   if (process.platform === "win32" && (!value || value.toLowerCase() === "mimo")) {
     return "mimo.cmd";
   }
