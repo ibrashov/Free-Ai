@@ -266,6 +266,17 @@ const nullByteMimoCodeArgs = _test.getMimoCodeRunArgs("hello\u0000", "ollama/qwe
   allowWorkspaceWrites: true
 });
 assert.equal(nullByteMimoCodeArgs.some((arg) => String(arg).includes("\u0000")), false);
+assert.deepEqual(_test.normalizeCodingAgentFileArgs(["C:\\tmp\\prompt.txt", "C:\\tmp\\prompt.txt", ""]), ["C:\\tmp\\prompt.txt"]);
+assert.deepEqual(_test.getMimoCodeRunArgs("read prompt", "ollama/qwen2.5-coder:3b", {
+  files: ["C:\\tmp\\prompt.txt"]
+}).slice(-2), ["--file", "C:\\tmp\\prompt.txt"]);
+assert.equal(_test.shouldUseCodingAgentPromptFile("mimo.cmd", '<html lang="kk">'), process.platform === "win32");
+assert.equal(_test.shouldUseCodingAgentPromptFile("mimo", '<html lang="kk">'), false);
+assert.match(_test.buildCodingAgentPromptFileMessage(), /attached prompt file/);
+assert.equal(_test.getErrorMessage({
+  message: "Command failed: mimo.cmd run huge prompt",
+  stderr: "\u001b[31mreal cli error\u001b[0m"
+}), "real cli error");
 assert.match(_test.buildCombinedAgentPlanPrompt("Fix tests"), /Do not edit files/);
 assert.equal(_test.buildCombinedAgentImplementationPrompt("Fix tests", "Plan text"), "Fix tests");
 assert.match(_test.buildCombinedAgentReviewPrompt("Fix tests", "Plan text", "Done"), /reviewing and repairing/);

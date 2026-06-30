@@ -1,5 +1,6 @@
 const vscode = require("vscode");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { exec, execFile, spawn } = require("child_process");
 const { promisify } = require("util");
@@ -3143,31 +3144,46 @@ async function runMimoCode(options) {
 
 async function runCodingCliAgent(options = {}) {
   const { command, model, authToken, prompt, cwd, timeoutMs, agent, allowWorkspaceWrites, normalizeCommand } = options;
-  const runArgs = getCodingAgentRunArgs(prompt, model, {
+  const normalizedCommand = (normalizeCommand || normalizeOpenCodeCommand)(command);
+  const promptFile = shouldUseCodingAgentPromptFile(normalizedCommand, prompt)
+    ? await writeCodingAgentPromptFile(prompt)
+    : null;
+  const runPrompt = promptFile
+    ? buildCodingAgentPromptFileMessage()
+    : prompt;
+  const runArgs = getCodingAgentRunArgs(runPrompt, model, {
     agent,
     allowWorkspaceWrites,
-    dir: cwd
-  });
-  const invocation = getCodingAgentProcessInvocation(command, runArgs, normalizeCommand);
-  const { stdout, stderr } = await execCodingAgentInvocation(invocation, {
-    cwd,
-    env: {
-      ...process.env,
-      ANTHROPIC_API_KEY: authToken || "freecc",
-      NO_COLOR: "1"
-    },
-    maxBuffer: 1024 * 1024 * 8,
-    timeout: timeoutMs || 180000,
-    windowsHide: true
+    dir: cwd,
+    files: promptFile ? [promptFile.file] : []
   });
 
-  const output = parseOpenCodeRunOutput(stdout) || cleanTerminalText(stdout || "").trim();
-  const errorOutput = cleanTerminalText(stderr || "").trim();
-  const text = output || errorOutput || "(OpenCode finished without text output)";
-  if (isQuotaOrRateLimitError(text)) {
-    throw new Error(text);
+  try {
+    const invocation = getCodingAgentProcessInvocation(normalizedCommand, runArgs, normalizeCommand);
+    const { stdout, stderr } = await execCodingAgentInvocation(invocation, {
+      cwd,
+      env: {
+        ...process.env,
+        ANTHROPIC_API_KEY: authToken || "freecc",
+        NO_COLOR: "1"
+      },
+      maxBuffer: 1024 * 1024 * 8,
+      timeout: timeoutMs || 180000,
+      windowsHide: true
+    });
+
+    const output = parseOpenCodeRunOutput(stdout) || cleanTerminalText(stdout || "").trim();
+    const errorOutput = cleanTerminalText(stderr || "").trim();
+    const text = output || errorOutput || "(OpenCode finished without text output)";
+    if (isQuotaOrRateLimitError(text)) {
+      throw new Error(text);
+    }
+    return text;
+  } finally {
+    if (promptFile) {
+      await cleanupCodingAgentPromptFile(promptFile);
+    }
   }
-  return text;
 }
 
 async function runLocalOllamaFileAgent(options = {}) {
@@ -3465,10 +3481,28 @@ function getCodingAgentRunArgs(prompt, model, options = {}) {
   if (dir) {
     args.push("--dir", dir);
   }
+  for (const file of normalizeCodingAgentFileArgs(options.files)) {
+    args.push("--file", file);
+  }
   if (options.allowWorkspaceWrites) {
     args.push("--dangerously-skip-permissions");
   }
   return args;
+}
+
+function normalizeCodingAgentFileArgs(files) {
+  const list = Array.isArray(files) ? files : [files].filter(Boolean);
+  const seen = new Set();
+  const normalized = [];
+  for (const file of list) {
+    const value = stripNullBytes(file).trim();
+    if (!value || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
 }
 
 function isWindowsCommandShim(command) {
@@ -3521,6 +3555,33 @@ function quoteWindowsCommandArgument(value) {
   return `"${text
     .replace(/%/g, "%%")
     .replace(/"/g, "\\\"")}"`;
+}
+
+function shouldUseCodingAgentPromptFile(command, prompt) {
+  if (!isWindowsCommandShim(command)) {
+    return false;
+  }
+  const text = stripNullBytes(prompt);
+  return text.length > 1800 || /["<>&|^%]/.test(text);
+}
+
+function buildCodingAgentPromptFileMessage() {
+  return "Read the attached prompt file and follow its instructions exactly. It contains the full user request and any attached file contents.";
+}
+
+async function writeCodingAgentPromptFile(prompt) {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "free-ai-agent-"));
+  const file = path.join(dir, "prompt.txt");
+  await fs.promises.writeFile(file, stripNullBytes(prompt), "utf8");
+  return { dir, file };
+}
+
+async function cleanupCodingAgentPromptFile(promptFile) {
+  try {
+    await fs.promises.rm(promptFile.dir, { recursive: true, force: true });
+  } catch {
+    // Temp cleanup is best effort; the next run should not depend on it.
+  }
 }
 
 async function runStepAgent(options = {}) {
@@ -4822,6 +4883,10 @@ function getErrorMessage(error) {
   if (!error) {
     return "Unknown error";
   }
+  const processOutput = cleanTerminalText(error.stderr || error.stdout || "");
+  if (processOutput) {
+    return processOutput;
+  }
   if (error.message) {
     return error.message;
   }
@@ -4865,7 +4930,10 @@ module.exports = {
     getOpenCodeRunArgs,
     getOpenCodeProcessInvocation,
     getProviderRuntimeState,
+    getErrorMessage,
     isQuotaOrRateLimitError,
+    buildCodingAgentPromptFileMessage,
+    normalizeCodingAgentFileArgs,
     normalizeLocalAgentCommand,
     normalizeGatewayModelName,
     normalizeMimoCodeCommand,
@@ -4883,6 +4951,7 @@ module.exports = {
     runStepAgent,
     selectStepAgentPlannerProvider,
     selectRoute,
+    shouldUseCodingAgentPromptFile,
     splitCommandLine,
     stripPromptForIntent,
     testProviderAvailability
