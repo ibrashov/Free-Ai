@@ -356,8 +356,8 @@ class FreeAiViewProvider {
       return;
     }
 
-    const routeText = text;
     let userDisplay = String(displayPrompt || text).trim();
+    const routeText = getPromptForRouting(text, userDisplay);
     let editSourceFiles = Array.isArray(attachedFiles) ? [...attachedFiles] : [];
     const chat = this.ensureChat(chatId);
     const previousMessages = [...chat.messages];
@@ -1950,6 +1950,33 @@ function appendFilesToPrompt(basePrompt, files) {
   });
   parts.push("--- END ATTACHED FILES ---");
   return parts.join("\n");
+}
+
+function getPromptForRouting(prompt, displayPrompt) {
+  const displayText = String(displayPrompt || "").trim();
+  return stripPromptForIntent(displayText || prompt);
+}
+
+function stripPromptForIntent(prompt) {
+  const text = String(prompt || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  const markers = [
+    /\n\s*If I ask you to edit an attached file/i,
+    /\n\s*--- ATTACHED FILES ---/i,
+    /\n\s*Attached files:\s*/i
+  ];
+  let cutAt = text.length;
+  for (const marker of markers) {
+    const match = marker.exec(text);
+    if (match && match.index >= 0) {
+      cutAt = Math.min(cutAt, match.index);
+    }
+  }
+
+  return text.slice(0, cutAt).trim();
 }
 
 function extractAtFileReferences(prompt) {
@@ -4041,8 +4068,11 @@ function selectRoute(options) {
 }
 
 function classifyPrompt(prompt, hasReferencedFiles) {
-  const text = String(prompt || "").toLowerCase();
+  const text = stripPromptForIntent(prompt).toLowerCase();
   const stepAgentIntent = hasStepAgentIntent(text);
+  const unicodeProjectWide = /(\u043f\u0440\u043e\u0435\u043a\u0442|\u043a\u043e\u0434\u0431\u0435\u0439\u0441|\u0440\u0435\u043f\u043e\u0437\u0438\u0442[\u043e\u0430]\u0440|\u0432\u0435\u0441\u044c\s+\u043f\u0440\u043e\u0435\u043a\u0442|\u0432\u0441\u044e\s+\u043f\u0430\u043f\u043a\u0443|workspace)/i.test(text);
+  const unicodeEditIntent = /(\u0438\u0441\u043f\u0440\u0430\u0432|\u0438\u0437\u043c\u0435\u043d|\u043e\u0442\u0440\u0435\u0434\u0430\u043a\u0442|\u0440\u0435\u0444\u0430\u043a\u0442\u043e\u0440|\u043f\u043e\u0447\u0438\u043d|\u0434\u043e\u0431\u0430\u0432|\u0443\u0434\u0430\u043b|\u043f\u0435\u0440\u0435\u043f\u0438\u0448)/i.test(text);
+  const unicodeLocalIntent = /(\u043b\u043e\u043a\u0430\u043b|\u043e\u0444\u043b\u0430\u0439\u043d|\u043f\u0440\u0438\u0432\u0430\u0442|\u0431\u0435\u0437\s+\u0438\u043d\u0442\u0435\u0440\u043d\u0435\u0442\u0430|\u043d\u0430\s+\u043d\u043e\u0443\u0442)/i.test(text);
   const cyrillicProjectWide = /(проект|кодбейс|репозит[оа]р|весь проект|всю папку|workspace)/i.test(text);
   const cyrillicEditIntent = /(исправ|измен|отредакт|рефактор|почин|добав|удал|перепиш)/i.test(text);
   const cyrillicLocalIntent = /(локально|офлайн|приват|без интернета|на ноуте)/i.test(text);
@@ -4050,7 +4080,7 @@ function classifyPrompt(prompt, hasReferencedFiles) {
   const editIntent = /(fix|edit|change|modify|refactor|apply|write|исправь|измени|отредактируй|рефактор|почини|добавь|удали|перепиши)/i.test(text);
   const localIntent = /(offline|local|private|privacy|ollama|gemma|локально|офлайн|приват|без интернета|на ноуте)/i.test(text);
 
-  if (projectWide || cyrillicProjectWide) {
+  if (projectWide || cyrillicProjectWide || unicodeProjectWide) {
     return {
       agent: true,
       stepAgent: false,
@@ -4070,7 +4100,7 @@ function classifyPrompt(prompt, hasReferencedFiles) {
     };
   }
 
-  if (editIntent || cyrillicEditIntent) {
+  if (editIntent || cyrillicEditIntent || unicodeEditIntent) {
     return {
       agent: true,
       stepAgent: false,
@@ -4080,7 +4110,7 @@ function classifyPrompt(prompt, hasReferencedFiles) {
     };
   }
 
-  if (localIntent || cyrillicLocalIntent) {
+  if (localIntent || cyrillicLocalIntent || unicodeLocalIntent) {
     return {
       agent: false,
       stepAgent: false,
@@ -4819,6 +4849,7 @@ module.exports = {
     getAutoChatProviders,
     getGatewayProviderTestId,
     getProviderOllamaModels,
+    getPromptForRouting,
     getOllamaStartEnv,
     getRequiredOllamaModels,
     getMimoCodeRunArgs,
@@ -4845,6 +4876,7 @@ module.exports = {
     selectStepAgentPlannerProvider,
     selectRoute,
     splitCommandLine,
+    stripPromptForIntent,
     testProviderAvailability
   }
 };

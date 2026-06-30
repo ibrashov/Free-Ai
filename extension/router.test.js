@@ -115,6 +115,29 @@ assert.equal(route({ prompt: "проверь весь проект" }).providers
 assert.equal(route({ prompt: "README.md проверь", hasReferencedFiles: true }).mode, "File Review");
 assert.notEqual(route({ prompt: "README.md проверь", hasReferencedFiles: true }).providers[0].id, "opencode-mimocode");
 
+const attachedReadPrompt = [
+  "read this file and tell what is there",
+  "",
+  "If I ask you to edit an attached file, return the COMPLETE replacement content for each edited file inside exactly one block like this:",
+  '<free_ai_file_edits><file path="exact attached file path">complete new file content</file></free_ai_file_edits>',
+  "Only use paths from the attached files. Do not say the edit was applied; VS Code will ask me to confirm.",
+  "",
+  "--- ATTACHED FILES ---",
+  "[1] arrays.html (C:\\Users\\Anuar\\Web\\lab3\\task1\\arrays.html)",
+  "~~~text",
+  "<html><body><script>let styles = [\"Jazz\", \"Blues\"];</script></body></html>",
+  "~~~",
+  "--- END ATTACHED FILES ---"
+].join("\n");
+assert.equal(_test.stripPromptForIntent(attachedReadPrompt), "read this file and tell what is there");
+const attachedReadRoute = route({ prompt: attachedReadPrompt, hasReferencedFiles: true });
+assert.equal(attachedReadRoute.mode, "File Review");
+assert.notEqual(attachedReadRoute.providers[0].id, "opencode-mimocode");
+
+assert.equal(route({ prompt: "\u043f\u0440\u043e\u0432\u0435\u0440\u044c \u0432\u0435\u0441\u044c \u043f\u0440\u043e\u0435\u043a\u0442" }).providers[0].id, "opencode-mimocode");
+assert.equal(route({ prompt: "arrays.html \u043d\u0443\u0436\u043d\u043e \u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c", hasReferencedFiles: true }).providers[0].id, "opencode-mimocode");
+assert.equal(route({ prompt: "\u043e\u0442\u0432\u0435\u0442\u044c \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e" }).providers[0].id, "ollama");
+
 assert.equal(route({ prompt: "anything", autoMode: "survival" }).mode, "Local");
 assert.equal(route({ prompt: "anything", autoMode: "survival" }).providers[0].id, "ollama");
 assert.equal(route({ prompt: "answer with gemma" }).providers[0].id, "gemma");
