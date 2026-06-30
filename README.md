@@ -18,7 +18,7 @@ http://127.0.0.1:8082
 ## What It Does
 
 - Adds a separate **Free AI** panel inside VS Code.
-- Lets you choose provider: Auto, Step Agent, OpenCode Agent, Cerebras, Gemini, Groq, OpenRouter, Ollama.
+- Lets you choose provider: Auto, Step Agent, OpenCode + MiMoCode, OpenCode Agent, MiMoCode Agent, Cerebras, Gemini, Groq, OpenRouter, Ollama.
 - Uses quota-aware routing with cooldowns and local Ollama fallback.
 - Adds **Step Agent** mode for build-style requests like "create a calculator": a free planner creates small steps, local Ollama executes them one by one, and the result is verified before it is shown.
 - Starts the local `free-claude-code` gateway automatically when the panel opens.
@@ -28,18 +28,20 @@ http://127.0.0.1:8082
 - Uses `free-claude-code` as a local proxy.
 - Keeps free AI chat separate from official Claude Code.
 - Includes PowerShell scripts for testing providers and switching models.
-- Avoids file editing tools by design.
+- Keeps chat providers separate from file-editing agents, with explicit agent modes for workspace reads/writes.
 
 ## What It Does Not Do
 
 This project does not try to replace Claude Code or Codex.
 
-Free providers can be unstable with file-editing tools like `Read`, `Write`, and `Edit`, so this extension is designed for chat output only:
+Free chat providers can be unstable with file-editing tools like `Read`, `Write`, and `Edit`, so normal chat providers remain chat-only:
 
 ```text
 good: explain, plan, draft, review pasted code
-not good: directly edit project files
+not good for chat providers: directly edit project files
 ```
+
+Workspace edits are handled only by explicit agent providers such as OpenCode + MiMoCode, OpenCode Agent, MiMoCode Agent, or the local Ollama file-agent fallback.
 
 ## Architecture
 
@@ -54,6 +56,16 @@ free-claude-code gateway
         |
         v
 Cerebras / Gemini / Groq / OpenRouter / Ollama
+
+Agent path:
+
+VS Code Free AI panel
+        |
+        v
+OpenCode + MiMoCode / local Ollama file-agent fallback
+        |
+        v
+workspace files
 
 Odysseus Chat can run next to it:
 
@@ -71,6 +83,9 @@ extension/
   extension.js
   package.json
   media/free-ai.svg
+
+opencode.json
+mimocode.json
 
 scripts/
   Install-FreeAIExtension.ps1
@@ -219,7 +234,7 @@ Auto mode is quota-aware and keeps Gemini out of automatic routing:
 balanced simple requests -> Cerebras/Groq/OpenRouter candidate, then Ollama fallback
 build-style requests like create/build calculator/app/site -> Step Agent
 compare mode -> several non-Gemini cloud providers
-project / file editing / codebase review requests -> OpenCode Agent
+project / file editing / codebase review requests -> OpenCode + MiMoCode
 gemma -> Gemma Local
 offline / local / private / ollama -> Ollama
 survival mode -> Gemma Local first
@@ -227,7 +242,36 @@ survival mode -> Gemma Local first
 
 Gemini and Gemini Fast remain available as manual choices, but Auto avoids them to preserve their small free quota. If a provider returns quota/rate-limit errors, Free AI Console puts it in cooldown and avoids it temporarily. The gateway has one active model at a time, so compare mode runs providers sequentially.
 
-OpenCode Agent is available as the project/file provider and is selected automatically for requests that ask to check the project, edit files, fix code, or refactor. When configured with an `ollama/...` model, it uses the built-in local Ollama file-agent path for workspace reads/writes/edits instead of waiting on the OpenCode CLI.
+OpenCode + MiMoCode is available as the default project/file provider and is selected automatically for requests that ask to check the project, edit files, fix code, or refactor.
+
+The combined flow is:
+
+```text
+OpenCode plans
+  -> MiMoCode implements
+  -> OpenCode reviews/repairs
+```
+
+On local Ollama models, MiMoCode can sometimes return a JSON edit instruction or stall instead of making a tool call. The extension keeps the run usable by applying safe workspace-only JSON edits when possible, then falling back to the built-in local Ollama file-agent if the MiMoCode CLI times out. The final answer says when that fallback was used.
+
+OpenCode Agent and MiMoCode Agent are also available as separate manual providers. OpenCode Agent still uses the built-in local Ollama file-agent path when configured with an `ollama/...` model.
+
+Install MiMoCode CLI if you want to use the MiMoCode providers:
+
+```powershell
+npm install -g @mimo-ai/cli
+```
+
+Useful settings:
+
+```json
+"freeAiConsole.openCodeCommand": "opencode",
+"freeAiConsole.openCodeModel": "ollama/qwen2.5-coder:3b",
+"freeAiConsole.mimoCodeCommand": "mimo",
+"freeAiConsole.mimoCodeModel": "ollama/qwen2.5-coder:3b",
+"freeAiConsole.mimoCodeAgent": "build",
+"freeAiConsole.mimoCodeAllowWorkspaceWrites": true
+```
 
 ## Step Agent
 

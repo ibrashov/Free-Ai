@@ -1,11 +1,12 @@
 const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
-const { execFile, spawn } = require("child_process");
+const { exec, execFile, spawn } = require("child_process");
 const { promisify } = require("util");
 const providerCatalog = require("./provider-catalog.json");
 
 const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
 
 const OPENCODE_PROVIDER = "opencode";
 const MIMOCODE_PROVIDER = "mimocode";
@@ -2788,20 +2789,19 @@ async function askCombinedCodingAgent(options = {}) {
   }
 
   const userPrompt = String(options.prompt || "").trim();
-  const plan = await runOpenCode({
+  const plan = await runCombinedOpenCodePlan({
     command: options.openCodeCommand,
     model: openCodeModel,
     authToken: options.authToken,
     prompt: buildCombinedAgentPlanPrompt(userPrompt),
     cwd,
-    agent: "plan",
-    allowWorkspaceWrites: false,
     timeoutMs: options.timeoutMs
   });
 
-  const implementation = await runMimoCode({
+  const implementation = await runMimoCodeWithWorkspaceFallback({
     command: options.mimoCodeCommand,
     model: mimoCodeModel,
+    ollamaUrl: options.ollamaUrl,
     authToken: options.authToken,
     prompt: buildCombinedAgentImplementationPrompt(userPrompt, plan),
     cwd,
@@ -2809,19 +2809,60 @@ async function askCombinedCodingAgent(options = {}) {
     allowWorkspaceWrites: options.allowWorkspaceWrites !== false,
     timeoutMs: options.timeoutMs
   });
+  const appliedImplementation = await applyCodingAgentSuggestedEdit(implementation, cwd, "MiMoCode");
 
-  const review = await runOpenCode({
+  const review = await runCombinedOpenCodeReview({
     command: options.openCodeCommand,
     model: openCodeModel,
     authToken: options.authToken,
-    prompt: buildCombinedAgentReviewPrompt(userPrompt, plan, implementation),
+    prompt: buildCombinedAgentReviewPrompt(userPrompt, plan, appliedImplementation || implementation),
     cwd,
-    agent: "build",
     allowWorkspaceWrites: options.allowWorkspaceWrites !== false,
     timeoutMs: options.timeoutMs
   });
 
-  return formatCombinedAgentResult({ plan, implementation, review });
+  return formatCombinedAgentResult({ plan, implementation: appliedImplementation || implementation, review });
+}
+
+async function runCombinedOpenCodePlan(options = {}) {
+  try {
+    return await runOpenCode({
+      command: options.command,
+      model: options.model,
+      authToken: options.authToken,
+      prompt: options.prompt,
+      cwd: options.cwd,
+      agent: "build",
+      allowWorkspaceWrites: false,
+      timeoutMs: Math.min(options.timeoutMs || 180000, 90000)
+    });
+  } catch (error) {
+    return [
+      formatAgentStageError("OpenCode planning", error),
+      "",
+      "Fallback plan:",
+      "1. Let MiMoCode inspect only the files needed for the user request.",
+      "2. Let MiMoCode make the smallest workspace edit or create the requested file.",
+      "3. Let OpenCode review the changed workspace and repair obvious issues."
+    ].join("\n");
+  }
+}
+
+async function runCombinedOpenCodeReview(options = {}) {
+  try {
+    return await runOpenCode({
+      command: options.command,
+      model: options.model,
+      authToken: options.authToken,
+      prompt: options.prompt,
+      cwd: options.cwd,
+      agent: "build",
+      allowWorkspaceWrites: options.allowWorkspaceWrites,
+      timeoutMs: Math.min(options.timeoutMs || 180000, 120000)
+    });
+  } catch (error) {
+    return formatAgentStageError("OpenCode review/repair", error);
+  }
 }
 
 async function askMimoCode(options = {}) {
@@ -2829,6 +2870,7 @@ async function askMimoCode(options = {}) {
     command,
     model,
     agent,
+    ollamaUrl,
     authToken,
     prompt,
     allowWorkspaceWrites,
@@ -2848,9 +2890,10 @@ async function askMimoCode(options = {}) {
     }
   }
 
-  return runMimoCode({
+  return runMimoCodeWithWorkspaceFallback({
     command,
     model: selectedModel,
+    ollamaUrl,
     authToken,
     prompt: buildMimoCodeAgentPrompt(prompt),
     cwd: workspaceFolder.uri.fsPath,
@@ -2858,6 +2901,39 @@ async function askMimoCode(options = {}) {
     allowWorkspaceWrites: allowWorkspaceWrites !== false,
     timeoutMs
   });
+}
+
+async function runMimoCodeWithWorkspaceFallback(options = {}) {
+  try {
+    const result = await runMimoCode({
+      command: options.command,
+      model: options.model,
+      authToken: options.authToken,
+      prompt: options.prompt,
+      cwd: options.cwd,
+      agent: options.agent || "build",
+      allowWorkspaceWrites: options.allowWorkspaceWrites !== false,
+      timeoutMs: Math.min(options.timeoutMs || 180000, 90000)
+    });
+    return applyCodingAgentSuggestedEdit(result, options.cwd, "MiMoCode") || result;
+  } catch (error) {
+    if (!String(options.model || "").startsWith("ollama/")) {
+      throw error;
+    }
+    const fallback = await runLocalOllamaFileAgent({
+      ollamaUrl: options.ollamaUrl || DEFAULT_OLLAMA_URL,
+      model: normalizeOpenCodeOllamaModel(options.model || MIMOCODE_MODEL),
+      prompt: options.prompt,
+      cwd: options.cwd,
+      timeoutMs: options.timeoutMs
+    });
+    return [
+      formatAgentStageError("MiMoCode CLI", error),
+      "",
+      "Local workspace fallback:",
+      fallback
+    ].join("\n");
+  }
 }
 
 function buildCombinedAgentPlanPrompt(userPrompt) {
@@ -2874,20 +2950,7 @@ function buildCombinedAgentPlanPrompt(userPrompt) {
 }
 
 function buildCombinedAgentImplementationPrompt(userPrompt, plan) {
-  return [
-    "You are MiMoCode working together with OpenCode inside VS Code.",
-    "OpenCode already produced the plan below. Use it, but verify the files yourself before editing.",
-    "You may read, edit, and create files only inside the current workspace.",
-    "Do not touch secrets, .env files, credentials, or files outside the workspace.",
-    "Make the smallest useful implementation. Run focused checks when practical.",
-    "After editing, summarize changed files and any test result.",
-    "",
-    "OpenCode plan:",
-    clipText(plan, 12000),
-    "",
-    "User request:",
-    String(userPrompt || "")
-  ].join("\n");
+  return String(userPrompt || "");
 }
 
 function buildCombinedAgentReviewPrompt(userPrompt, plan, implementation) {
@@ -2909,17 +2972,7 @@ function buildCombinedAgentReviewPrompt(userPrompt, plan, implementation) {
 }
 
 function buildMimoCodeAgentPrompt(prompt) {
-  return [
-    "You are MiMoCode called from the user's Free AI VS Code panel.",
-    "Read project files when the request asks about files, code, or project review.",
-    "If the user asks to fix, edit, change, or create files, make the smallest useful workspace edits.",
-    "Do not touch secrets, .env files, credentials, or files outside the workspace.",
-    "Run focused checks when practical, then summarize what changed.",
-    "If the request is only a question or review, answer in chat without editing files.",
-    "",
-    "User request:",
-    String(prompt || "")
-  ].join("\n");
+  return String(prompt || "");
 }
 
 function formatCombinedAgentResult(result = {}) {
@@ -2934,6 +2987,30 @@ function formatCombinedAgentResult(result = {}) {
     "",
     "OpenCode review/repair:",
     clipText(result.review, 8000)
+  ].join("\n").trim();
+}
+
+function formatAgentStageError(stage, error) {
+  return `${stage} did not finish: ${clipText(getErrorMessage(error), 900)}`;
+}
+
+async function applyCodingAgentSuggestedEdit(rawOutput, cwd, label = "Agent") {
+  const command = normalizeLocalAgentCommand(rawOutput);
+  if (!command || !["write_file", "replace_in_file"].includes(command.action)) {
+    return "";
+  }
+
+  const changes = [];
+  const observation = await executeLocalAgentCommand(command, cwd, changes);
+  const heading = changes.length > 0
+    ? `${label} returned an edit instruction; Free AI applied it safely inside the workspace.`
+    : `${label} returned an edit instruction, but Free AI could not apply it.`;
+  return [
+    heading,
+    observation,
+    "",
+    `${label} output:`,
+    clipText(rawOutput, 4000)
   ].join("\n").trim();
 }
 
@@ -3037,24 +3114,21 @@ async function runCodingCliAgent(options = {}) {
   const { command, model, authToken, prompt, cwd, timeoutMs, agent, allowWorkspaceWrites, normalizeCommand } = options;
   const runArgs = getCodingAgentRunArgs(prompt, model, {
     agent,
-    allowWorkspaceWrites
+    allowWorkspaceWrites,
+    dir: cwd
   });
   const invocation = getCodingAgentProcessInvocation(command, runArgs, normalizeCommand);
-  const { stdout, stderr } = await execFileAsync(
-    invocation.command,
-    invocation.args,
-    {
-      cwd,
-      env: {
-        ...process.env,
-        ANTHROPIC_API_KEY: authToken || "freecc",
-        NO_COLOR: "1"
-      },
-      maxBuffer: 1024 * 1024 * 8,
-      timeout: timeoutMs || 180000,
-      windowsHide: true
-    }
-  );
+  const { stdout, stderr } = await execCodingAgentInvocation(invocation, {
+    cwd,
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: authToken || "freecc",
+      NO_COLOR: "1"
+    },
+    maxBuffer: 1024 * 1024 * 8,
+    timeout: timeoutMs || 180000,
+    windowsHide: true
+  });
 
   const output = parseOpenCodeRunOutput(stdout) || cleanTerminalText(stdout || "").trim();
   const errorOutput = cleanTerminalText(stderr || "").trim();
@@ -3184,7 +3258,10 @@ function normalizeLocalAgentCommand(raw) {
   const explicitAction = getLocalAgentScalar(parsed.action || parsed.name || parsed.tool || parsed.command);
   const objectAction = explicitAction ? "" : ["write_file", "write", "read_file", "read", "replace_in_file", "replace", "edit", "list_files", "list", "finish", "final"]
     .find((key) => parsed && typeof parsed === "object" && parsed[key]);
-  const rawAction = explicitAction || objectAction || "";
+  const inferredAction = !explicitAction && !objectAction && (parsed.newFile || parsed.filePath || parsed.filename) && parsed.content !== undefined
+    ? "write_file"
+    : "";
+  const rawAction = explicitAction || objectAction || inferredAction || "";
   const action = normalizeLocalAgentAction(rawAction);
   if (!action) {
     return null;
@@ -3193,7 +3270,7 @@ function normalizeLocalAgentCommand(raw) {
   const args = parsed.arguments || parsed.args || (objectAction ? parsed[objectAction] : parsed) || {};
   return {
     action,
-    path: getLocalAgentScalar(args.path || args.filePath || args.file || args.filename || parsed.path),
+    path: getLocalAgentScalar(args.path || args.filePath || args.file || args.filename || args.newFile || parsed.path || parsed.filePath || parsed.filename || parsed.newFile),
     content: getLocalAgentScalar(args.content || args.text || parsed.content),
     oldText: getLocalAgentScalar(args.oldText || args.old_text || args.old || args.oldString || args.old_string),
     newText: getLocalAgentScalar(args.newText || args.new_text || args.new || args.newString || args.new_string),
@@ -3289,7 +3366,7 @@ async function executeLocalAgentCommand(command, cwd, changes) {
 }
 
 function resolveLocalAgentPath(cwd, requestedPath) {
-  const raw = String(requestedPath || "").trim().replace(/^["']|["']$/g, "");
+  const raw = String(requestedPath || "").trim().replace(/^["']|["']$/g, "").replace(/^[\\/]+/, "");
   if (!raw) {
     throw new Error("Missing path.");
   }
@@ -3348,10 +3425,14 @@ function getMimoCodeRunArgs(prompt, model, options = {}) {
 }
 
 function getCodingAgentRunArgs(prompt, model, options = {}) {
-  const args = ["run", String(prompt || ""), "-m", model || OPENCODE_MODEL, "--format", "json"];
+  const args = ["run", normalizeCodingAgentPromptArgument(prompt), "-m", model || OPENCODE_MODEL, "--format", "json"];
   const agent = String(options.agent || "").trim();
   if (agent) {
     args.push("--agent", agent);
+  }
+  const dir = String(options.dir || "").trim();
+  if (dir) {
+    args.push("--dir", dir);
   }
   if (options.allowWorkspaceWrites) {
     args.push("--dangerously-skip-permissions");
@@ -3381,9 +3462,34 @@ function getCodingAgentProcessInvocation(command, args = [], normalizeCommand = 
   }
 
   return {
-    command: process.env.ComSpec || "cmd.exe",
-    args: ["/d", "/s", "/c", normalizedCommand, ...args]
+    commandLine: buildWindowsCommandLine([normalizedCommand, ...args])
   };
+}
+
+async function execCodingAgentInvocation(invocation, options = {}) {
+  if (invocation.commandLine) {
+    const execOptions = options.cwd ? { ...options, cwd: process.cwd() } : options;
+    return execAsync(invocation.commandLine, execOptions);
+  }
+  return execFileAsync(invocation.command, invocation.args || [], options);
+}
+
+function normalizeCodingAgentPromptArgument(prompt) {
+  return String(prompt || "").replace(/\r\n/g, "\n").replace(/\n/g, "\\n");
+}
+
+function buildWindowsCommandLine(args = []) {
+  return args.map(quoteWindowsCommandArgument).join(" ");
+}
+
+function quoteWindowsCommandArgument(value) {
+  const text = String(value ?? "");
+  if (!text) {
+    return "\"\"";
+  }
+  return `"${text
+    .replace(/%/g, "%%")
+    .replace(/"/g, "\\\"")}"`;
 }
 
 async function runStepAgent(options = {}) {
@@ -4068,20 +4174,16 @@ async function testCodingCliCommandAvailability(options = {}) {
   const command = normalizeCommand(options.command);
   const invocation = getCodingAgentProcessInvocation(command, ["--version"], normalizeCommand);
   try {
-    const { stdout, stderr } = await execFileAsync(
-      invocation.command,
-      invocation.args,
-      {
-        cwd: vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath || process.cwd(),
-        env: {
-          ...process.env,
-          NO_COLOR: "1"
-        },
-        maxBuffer: 1024 * 1024,
-        timeout: Math.min(options.timeoutMs || PROVIDER_TEST_TIMEOUT_MS, 15000),
-        windowsHide: true
-      }
-    );
+    const { stdout, stderr } = await execCodingAgentInvocation(invocation, {
+      cwd: vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath || process.cwd(),
+      env: {
+        ...process.env,
+        NO_COLOR: "1"
+      },
+      maxBuffer: 1024 * 1024,
+      timeout: Math.min(options.timeoutMs || PROVIDER_TEST_TIMEOUT_MS, 15000),
+      windowsHide: true
+    });
     const version = cleanTerminalText(stdout || stderr || "").split(/\r?\n/).find(Boolean) || "available";
     return `${options.label || command} ${version}`;
   } catch (error) {
@@ -4695,6 +4797,8 @@ module.exports = {
   deactivate,
   _test: {
     FreeAiViewProvider,
+    askCombinedCodingAgent,
+    askMimoCode,
     appendConversationContext,
     buildStepAgentPlanPrompt,
     buildStepAgentVerificationPrompt,

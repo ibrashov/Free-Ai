@@ -218,6 +218,7 @@ assert.deepEqual(_test.getOpenCodeRunArgs("hello", "ollama/qwen2.5-coder:3b"), [
   "--format",
   "json"
 ]);
+assert.equal(_test.getOpenCodeRunArgs("line one\nline two", "ollama/qwen2.5-coder:3b")[1], "line one\\nline two");
 assert.deepEqual(_test.getMimoCodeRunArgs("hello", "ollama/qwen2.5-coder:3b", {
   agent: "build",
   allowWorkspaceWrites: true
@@ -233,20 +234,18 @@ assert.deepEqual(_test.getMimoCodeRunArgs("hello", "ollama/qwen2.5-coder:3b", {
   "--dangerously-skip-permissions"
 ]);
 assert.match(_test.buildCombinedAgentPlanPrompt("Fix tests"), /Do not edit files/);
-assert.match(_test.buildCombinedAgentImplementationPrompt("Fix tests", "Plan text"), /OpenCode already produced the plan/);
+assert.equal(_test.buildCombinedAgentImplementationPrompt("Fix tests", "Plan text"), "Fix tests");
 assert.match(_test.buildCombinedAgentReviewPrompt("Fix tests", "Plan text", "Done"), /reviewing and repairing/);
-assert.match(_test.buildMimoCodeAgentPrompt("Fix tests"), /MiMoCode/);
+assert.equal(_test.buildMimoCodeAgentPrompt("Fix tests"), "Fix tests");
 if (process.platform === "win32") {
   assert.equal(_test.normalizeOpenCodeCommand("opencode"), "opencode.cmd");
   assert.equal(_test.normalizeOpenCodeCommand(""), "opencode.cmd");
   assert.equal(_test.normalizeMimoCodeCommand("mimo"), "mimo.cmd");
   assert.equal(_test.normalizeMimoCodeCommand(""), "mimo.cmd");
   const openCodeInvocation = _test.getOpenCodeProcessInvocation("opencode", ["--version"]);
-  assert.match(openCodeInvocation.command, /cmd\.exe$/i);
-  assert.deepEqual(openCodeInvocation.args, ["/d", "/s", "/c", "opencode.cmd", "--version"]);
+  assert.deepEqual(openCodeInvocation, { commandLine: '"opencode.cmd" "--version"' });
   const mimoCodeInvocation = _test.getMimoCodeProcessInvocation("mimo", ["--version"]);
-  assert.match(mimoCodeInvocation.command, /cmd\.exe$/i);
-  assert.deepEqual(mimoCodeInvocation.args, ["/d", "/s", "/c", "mimo.cmd", "--version"]);
+  assert.deepEqual(mimoCodeInvocation, { commandLine: '"mimo.cmd" "--version"' });
 } else {
   assert.equal(_test.normalizeOpenCodeCommand("opencode"), "opencode");
   assert.equal(_test.normalizeMimoCodeCommand("mimo"), "mimo");
@@ -271,6 +270,17 @@ assert.deepEqual(_test.normalizeLocalAgentCommand(JSON.stringify({
 })), {
   action: "write_file",
   path: "result.txt",
+  content: "OK",
+  oldText: "",
+  newText: "",
+  answer: ""
+});
+assert.deepEqual(_test.normalizeLocalAgentCommand(JSON.stringify({
+  newFile: "/result.txt",
+  content: "OK"
+})), {
+  action: "write_file",
+  path: "/result.txt",
   content: "OK",
   oldText: "",
   newText: "",
