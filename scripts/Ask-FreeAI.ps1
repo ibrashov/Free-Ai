@@ -61,7 +61,7 @@ if (-not [string]::IsNullOrWhiteSpace($SelectedProvider)) {
     }
     if ($currentModel -ne $expectedModel -and -not $expectedModel.StartsWith("ollama/")) {
         $switchScript = Join-Path $PSScriptRoot "Set-GatewayModel.ps1"
-        & $switchScript -Provider $SelectedProvider | Out-Null
+        & $switchScript -Provider $SelectedProvider -GatewayUrl $GatewayUrl -AuthToken $AuthToken | Out-Null
     }
 }
 
@@ -122,7 +122,7 @@ if ($expectedModel -and $expectedModel.StartsWith("ollama/")) {
     } else {
         $ollamaText
     }
-    exit 0
+    return
 }
 
 $body = @{
