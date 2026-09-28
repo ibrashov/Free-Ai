@@ -13,7 +13,7 @@ Copy-Item -LiteralPath $SettingsPath -Destination $backupPath -Force
 
 $json = Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json
 
-$json."claudeCode.disableLoginPrompt" = $false
+$json | Add-Member -NotePropertyName 'claudeCode.disableLoginPrompt' -NotePropertyValue $false -Force
 
 if ($json."claudeCode.environmentVariables") {
     $json."claudeCode.environmentVariables" = @(
