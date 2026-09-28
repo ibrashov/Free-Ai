@@ -10,6 +10,23 @@ if (-not (Test-Path $Source)) {
     throw "Extension source not found: $Source"
 }
 
+# Validate every configurable deletion target before touching installed files.
+$extensionsRoot = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.vscode\extensions'))
+$sourcePath = [IO.Path]::GetFullPath($Source).TrimEnd('\', '/')
+foreach ($target in @($Destination, $LegacyDestination)) {
+    if (-not $target) { continue }
+    $resolvedTarget = [IO.Path]::GetFullPath($target).TrimEnd('\', '/')
+    if ((Split-Path -Parent $resolvedTarget) -ne $extensionsRoot -or
+        (Split-Path -Leaf $resolvedTarget) -notmatch '^(anuar-local\.)?anuar-free-ai-console-\d+\.\d+\.\d+$' -or
+        $sourcePath -eq $resolvedTarget -or $sourcePath.StartsWith($resolvedTarget + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unsafe extension installation destination: $resolvedTarget"
+    }
+    if ((Test-Path -LiteralPath $resolvedTarget) -and
+        ((Get-Item -LiteralPath $resolvedTarget).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Installation destination must not be a junction or symbolic link: $resolvedTarget"
+    }
+}
+
 $destinationParent = Split-Path -Parent $Destination
 if (-not (Test-Path $destinationParent)) {
     New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
