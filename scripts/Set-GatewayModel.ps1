@@ -47,12 +47,15 @@ $payload = @{
 $response = Invoke-WebRequest `
     -Uri "$GatewayUrl/admin/api/config/apply" `
     -Method Post `
-    -Headers @{ "Content-Type" = "application/json" } `
+    -Headers @{ "Content-Type" = "application/json"; Authorization = "Bearer $AuthToken" } `
     -Body $payload `
     -UseBasicParsing `
     -TimeoutSec 30
 
 $json = $response.Content | ConvertFrom-Json
+if ($json.applied -ne $true -or $json.valid -ne $true) {
+    throw "Gateway rejected the model configuration. Check the provider and model in the gateway admin panel."
+}
 Write-Host "Applied: $($json.applied)"
 Write-Host "Valid:   $($json.valid)"
 
